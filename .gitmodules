@@ -1,0 +1,6 @@
+[submodule "lib/zig-wayland"]
+	path = lib/zig-wayland
+	url = https://codeberg.org/ifreund/zig-wayland
+[submodule "lib/vulkan-zig"]
+	path = lib/vulkan-zig
+	url = https://github.com/Snektron/vulkan-zig
