@@ -40,11 +40,13 @@ pub fn init(gpa: Allocator, display: *const Wayland) !Vulkan {
     const instance = try createInstance(&app_info);
     const surface = try createSurface(instance, display);
     const physical_device = try selectPhysicalDevice(instance, arena);
-    const queue_families = try findQueueFamilies(physical_device, arena);
-    const device = try createLogicalDevice(physical_device, queue_families, layers);
+    const queue_families = try findQueueFamilies(physical_device, arena, surface);
+    const device = try createLogicalDevice(arena, physical_device, queue_families, layers);
 
     var graphics_queue: c.VkQueue = undefined;
+    var presentation_queue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, queue_families.graphics, 0, &graphics_queue);
+    c.vkGetDeviceQueue(device, queue_families.presentation, 0, &presentation_queue);
 
     return .{
         .instance = instance,
@@ -120,7 +122,11 @@ fn selectPhysicalDevice(instance: c.VkInstance, arena: Allocator) !c.VkPhysicalD
 }
 
 // TODO: support failing to find queue families
-fn findQueueFamilies(device: c.VkPhysicalDevice, arena: Allocator) !QueueFamilies {
+fn findQueueFamilies(
+    device: c.VkPhysicalDevice,
+    arena: Allocator,
+    surface: c.VkSurfaceKHR,
+) !QueueFamilies {
     var graphics: ?u32 = null;
     var presentation: ?u32 = 0; // TODO
 
@@ -134,8 +140,9 @@ fn findQueueFamilies(device: c.VkPhysicalDevice, arena: Allocator) !QueueFamilie
             graphics = @intCast(i);
         }
 
-        // var presentation_support: c.VkBool32 = false;
-        // c.vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, )
+        var presentation_support: c.VkBool32 = @intFromBool(false);
+        _ = c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface, &presentation_support);
+        if (presentation_support == @intFromBool(true)) presentation = @intCast(i);
     }
 
     return .{
@@ -145,31 +152,45 @@ fn findQueueFamilies(device: c.VkPhysicalDevice, arena: Allocator) !QueueFamilie
 }
 
 fn createLogicalDevice(
+    arena: Allocator,
     physical_device: c.VkPhysicalDevice,
     queue_families: QueueFamilies,
     layers: cstrings,
 ) !c.VkDevice {
-    const queue_create_info: c.VkDeviceQueueCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .queueFamilyIndex = queue_families.graphics,
-        .queueCount = 1,
-        .pQueuePriorities = &@as(f32, 1.0),
-    };
+    const families: []const u32 = &.{ queue_families.graphics, queue_families.presentation };
+    const queue_create_infos = try arena.alloc(c.VkDeviceQueueCreateInfo, families.len);
+
+    const priority: f32 = 1.0;
+    var unique_queues: u32 = 0;
+    for (families, 0..) |family, i| {
+        if (std.mem.indexOfScalar(u32, families[0..i], family) != null) continue;
+        queue_create_infos[unique_queues] = .{
+            .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .queueFamilyIndex = family,
+            .queueCount = 1,
+            .pQueuePriorities = &priority,
+        };
+        unique_queues += 1;
+    }
 
     var device_features: c.VkPhysicalDeviceFeatures = undefined;
     @memset(std.mem.asBytes(&device_features), 0);
 
+    const extensions: cstrings = &.{
+        c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+    // TODO: compatibility checks for swapchain
     const device_create_info: c.VkDeviceCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .pQueueCreateInfos = &queue_create_info,
-        .queueCreateInfoCount = 1,
+        .queueCreateInfoCount = unique_queues,
+        .pQueueCreateInfos = queue_create_infos.ptr,
         .pEnabledFeatures = &device_features,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = null,
+        .enabledExtensionCount = extensions.len,
+        .ppEnabledExtensionNames = extensions.ptr,
         .enabledLayerCount = @intCast(layers.len),
         .ppEnabledLayerNames = layers.ptr,
     };
