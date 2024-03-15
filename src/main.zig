@@ -15,6 +15,8 @@ pub fn main() !void {
 
     // display.mainloop();
 
+    try vulkan.drawFrame();
+
     while (true) {
         _ = display.display.roundtrip();
     }

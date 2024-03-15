@@ -69,7 +69,10 @@ fn xdgToplevelListener(
     state: *Wayland,
 ) void {
     switch (event) {
-        .configure => {},
+        .configure => |configure| {
+            state.size.width = configure.width;
+            state.size.height = configure.height;
+        },
         .close => {
             state.running = false;
         },
@@ -109,10 +112,18 @@ pub const Wayland = struct {
 
     configured: bool,
     running: bool,
+    size: struct {
+        width: i32,
+        height: i32,
+    },
 
     pub fn init() !Wayland {
         // TODO: is there a safer way to do this without a lot of nullable mess?
         var state: Wayland = undefined;
+        state.running = false;
+        state.configured = false;
+        state.size = .{ .width = 0, .height = 0 };
+
         state.display = try wl.Display.connect(null);
         state.registry = try state.display.getRegistry();
         state.registry.setListener(*Wayland, registryListener, &state);
