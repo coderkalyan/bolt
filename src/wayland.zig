@@ -144,9 +144,6 @@ pub const Wayland = struct {
         state.xdg_toplevel.setAppId("bolt");
         state.surface.commit();
         while (state.display.dispatch() == .SUCCESS and !state.configured) {}
-        // TODO: needed?
-        if (state.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
-        state.surface.commit();
 
         return state;
     }

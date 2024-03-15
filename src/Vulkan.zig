@@ -390,7 +390,7 @@ fn chooseSwapExtent(capabilities: *const c.VkSurfaceCapabilitiesKHR) c.VkExtent2
     } else {
         // TODO: implement this properly
         return .{
-            .width = 480,
+            .width = 960,
             .height = 1080,
         };
     }
