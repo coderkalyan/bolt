@@ -1,5 +1,5 @@
 const std = @import("std");
-const App = @import("main.zig").App;
+const App = @import("App.zig");
 const Wayland = @import("Wayland.zig");
 const GlyphCache = @import("GlyphCache.zig");
 const Allocator = std.mem.Allocator;
@@ -39,6 +39,7 @@ const SyncObjects = struct {
 
 gpa: Allocator,
 app: *App,
+
 instance: c.VkInstance,
 surface: c.VkSurfaceKHR,
 physical_device: c.VkPhysicalDevice,
@@ -56,8 +57,9 @@ pipeline_layout: c.VkPipelineLayout,
 pipeline: c.VkPipeline,
 command_buffer: c.VkCommandBuffer,
 
-pub fn init(gpa: Allocator, app: *App, gc: *GlyphCache) !Vulkan {
-    _ = gc;
+pub fn init(app: *App) !Vulkan {
+    const gpa = app.gpa;
+
     const app_info: c.VkApplicationInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pNext = null,
@@ -69,7 +71,7 @@ pub fn init(gpa: Allocator, app: *App, gc: *GlyphCache) !Vulkan {
     };
 
     const instance = try createInstance(&app_info);
-    const surface = try createSurface(instance, app.wayland);
+    const surface = try createSurface(instance, &app.wayland);
     const physical_device = try selectPhysicalDevice(gpa, instance, surface);
     const queue_families = try findQueueFamilies(gpa, physical_device, surface);
     const device = try createLogicalDevice(gpa, physical_device, queue_families);
@@ -100,7 +102,6 @@ pub fn init(gpa: Allocator, app: *App, gc: *GlyphCache) !Vulkan {
         .pipeline = null,
         .command_buffer = null,
     };
-    try vulkan.initBufferObjects();
 
     return vulkan;
 }
@@ -133,6 +134,9 @@ pub fn initBufferObjects(self: *Vulkan) !void {
 
     self.framebuffers = try self.createFramebuffers();
     self.command_buffer = try self.createCommandBuffer();
+
+    // TODO: move this
+    try self.createGlyphAtlas();
 }
 
 fn createInstance(
@@ -436,8 +440,8 @@ fn chooseSwapExtent(
         return capabilities.currentExtent;
     } else {
         return .{
-            .width = app.width,
-            .height = app.height,
+            .width = app.terminal.size.width,
+            .height = app.terminal.size.height,
         };
     }
 }
@@ -668,10 +672,10 @@ fn createGraphicsPipeline(
         .blendConstants = .{ 0.0, 0.0, 0.0, 0.0 },
     };
 
-    comptime std.debug.assert(@sizeOf(Terminal) <= 128);
+    comptime std.debug.assert(@sizeOf(App.Terminal) <= 128);
     const push_info: c.VkPushConstantRange = .{
         .offset = 0,
-        .size = @sizeOf(Terminal),
+        .size = @sizeOf(App.Terminal),
         .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
     };
 
@@ -853,21 +857,11 @@ fn recordCommandBuffer(
     const offsets: []const c.VkDeviceSize = &.{0};
     c.vkCmdBindVertexBuffers(command_buffer, 0, @intCast(vertex_buffers.len), vertex_buffers.ptr, offsets.ptr);
 
-    const cell_width: u32 = 10;
-    const cell_height: u32 = 25;
-    const cells_x = self.app.width / cell_width;
-    const cells_y = self.app.height / cell_height;
-    const terminal: Terminal = .{
-        .size = .{ .width = self.app.width, .height = self.app.height },
-        .cells = .{ .rows = cells_x, .cols = cells_y },
-        .cell_size = .{ .width = cell_width, .height = cell_height },
-        .offset = .{ .x = 0, .y = 0 },
-    };
+    c.vkCmdPushConstants(command_buffer, self.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(App.Terminal), &self.app.terminal);
 
-    c.vkCmdPushConstants(command_buffer, self.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Terminal), &terminal);
-
-    // TODO: find the number of instances properly
-    c.vkCmdDraw(command_buffer, 6, cells_x * cells_y, 0, 0);
+    const nvertices = 6; // 2 triangles
+    const ninstances = self.app.terminal.cells.cols * self.app.terminal.cells.rows;
+    c.vkCmdDraw(command_buffer, nvertices, ninstances, 0, 0);
 
     c.vkCmdEndRenderPass(command_buffer);
     if (c.vkEndCommandBuffer(command_buffer) != c.VK_SUCCESS) {
@@ -993,66 +987,121 @@ pub const Cell = struct {
     }
 };
 
-// mirrored to GPU via push constant
-pub const Terminal = struct {
-    // these can be smaller if necessary but we have the space
-    // and shrinking them doesn't help much and causes potential problems
-    // with glsl (which likes everything to be 32 bits)
-
-    // window extent (in pixels)
-    size: struct { width: u32, height: u32 },
-    // number of cells
-    cells: struct { cols: u32, rows: u32 },
-    // cell size (in pixels)
-    cell_size: struct { width: u32, height: u32 },
-    // offset to first cell corner
-    offset: struct { x: u32, y: u32 },
-};
-
-pub fn createCellAttributesBuffer(self: *Vulkan, cells: []const Cell) !c.VkBuffer {
+pub fn createBuffer(
+    self: *Vulkan,
+    size: c.VkDeviceSize,
+    usage: c.VkBufferUsageFlags,
+    properties: c.VkMemoryPropertyFlags,
+    buffer: *c.VkBuffer,
+    memory: *c.VkDeviceMemory,
+) !void {
     const buffer_info: c.VkBufferCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .size = @sizeOf(Cell) * cells.len,
-        .usage = c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .size = size,
+        .usage = usage,
         .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = null,
     };
 
-    var buffer: c.VkBuffer = undefined;
-    if (c.vkCreateBuffer(self.device, &buffer_info, null, &buffer) != c.VK_SUCCESS) {
+    if (c.vkCreateBuffer(self.device, &buffer_info, null, buffer) != c.VK_SUCCESS) {
         return error.VkCreateBufferFailed;
     }
 
     var requirements: c.VkMemoryRequirements = undefined;
-    c.vkGetBufferMemoryRequirements(self.device, buffer, &requirements);
+    c.vkGetBufferMemoryRequirements(self.device, buffer.*, &requirements);
 
     const alloc_info: c.VkMemoryAllocateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .pNext = null,
         .allocationSize = requirements.size,
-        .memoryTypeIndex = findMemoryType(self.physical_device, requirements.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        .memoryTypeIndex = findMemoryType(self.physical_device, requirements.memoryTypeBits, properties),
     };
 
-    var memory: c.VkDeviceMemory = undefined;
-    if (c.vkAllocateMemory(self.device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
+    if (c.vkAllocateMemory(self.device, &alloc_info, null, memory) != c.VK_SUCCESS) {
         return error.VkAllocateMemoryFailed;
     }
 
-    _ = c.vkBindBufferMemory(self.device, buffer, memory, 0);
+    _ = c.vkBindBufferMemory(self.device, buffer.*, memory.*, 0);
+}
+
+pub fn createCellAttributesBuffer(self: *Vulkan, cells: []const Cell) !c.VkBuffer {
+    const size = @sizeOf(Cell) * cells.len;
+    var usage: c.VkBufferUsageFlags = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    var properties: c.VkMemoryPropertyFlags = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    var staging_buffer: c.VkBuffer = undefined;
+    var staging_memory: c.VkDeviceMemory = undefined;
+    try self.createBuffer(size, usage, properties, &staging_buffer, &staging_memory);
+    defer c.vkDestroyBuffer(self.device, staging_buffer, null);
+    defer c.vkFreeMemory(self.device, staging_memory, null);
 
     var data: []Cell = undefined;
     data.len = cells.len;
-    _ = c.vkMapMemory(self.device, memory, 0, buffer_info.size, 0, @ptrCast(&data.ptr));
+    _ = c.vkMapMemory(self.device, staging_memory, 0, size, 0, @ptrCast(&data.ptr));
     @memcpy(data, cells);
-    c.vkUnmapMemory(self.device, memory);
+    c.vkUnmapMemory(self.device, staging_memory);
 
-    return buffer;
+    usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    properties = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    var attribute_buffer: c.VkBuffer = undefined;
+    var attribute_memory: c.VkDeviceMemory = undefined;
+    try self.createBuffer(size, usage, properties, &attribute_buffer, &attribute_memory);
+    self.copyBuffer(staging_buffer, attribute_buffer, size);
+
+    return attribute_buffer;
 }
 
-fn createGlyphAtlas(gpa: Allocator, physical_device: c.VkPhysicalDevice, device: c.VkDevice, gc: *const GlyphCache) !void {
+fn copyBuffer(self: *Vulkan, src: c.VkBuffer, dest: c.VkBuffer, size: c.VkDeviceSize) void {
+    const alloc_info: c.VkCommandBufferAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = null,
+        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = self.command_pool,
+        .commandBufferCount = 1,
+    };
+
+    var command_buffer: c.VkCommandBuffer = undefined;
+    _ = c.vkAllocateCommandBuffers(self.device, &alloc_info, &command_buffer);
+    defer c.vkFreeCommandBuffers(self.device, self.command_pool, 1, &command_buffer);
+
+    const begin_info: c.VkCommandBufferBeginInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = null,
+        .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = null,
+    };
+    _ = c.vkBeginCommandBuffer(command_buffer, &begin_info);
+
+    const region: c.VkBufferCopy = .{
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size,
+    };
+    c.vkCmdCopyBuffer(command_buffer, src, dest, 1, &region);
+    _ = c.vkEndCommandBuffer(command_buffer);
+
+    const submit_info: c.VkSubmitInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = null,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &command_buffer,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = null,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = null,
+        .pWaitDstStageMask = null,
+    };
+    _ = c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, @ptrCast(c.VK_NULL_HANDLE));
+    _ = c.vkQueueWaitIdle(self.graphics_queue);
+}
+
+fn createGlyphAtlas(self: *Vulkan) !void {
+    const gpa = self.gpa;
+    const app = @fieldParentPtr(App, "vulkan", self);
+    const gc = &app.glyph_cache;
     // for (gc.ascii) |glyph| {
     //     std.debug.print("cp: {} cols: {} advance x: {} y: {}\n", .{ glyph.cp, glyph.cols, glyph.advance.x, glyph.advance.y });
     //     std.debug.print("format: {} {} {} {} {}\n", .{ c.pixman_image_get_format(@ptrCast(glyph.pix)), c.PIXMAN_a1, c.PIXMAN_a8, c.PIXMAN_x8r8g8b8, c.PIXMAN_a8r8g8b8 });
@@ -1079,99 +1128,6 @@ fn createGlyphAtlas(gpa: Allocator, physical_device: c.VkPhysicalDevice, device:
     //     }
     //     std.debug.print("\n", .{});
     // }
-    const width: u32 = @intCast(gc.ascii['a'].width);
-    const height: u32 = @intCast(gc.ascii['a'].height);
-    const stride: u32 = @intCast(c.pixman_image_get_stride(@ptrCast(gc.ascii['a'].pix)));
-
-    var atlas = try gpa.alloc(u8, width * 128 * height);
-    const cp_stride = width * height;
-    var cp: usize = 0;
-    while (cp < 128) : (cp += 1) {
-        const glyph = gc.ascii[cp];
-        const data: [*]u8 = @ptrCast(c.pixman_image_get_data(@ptrCast(glyph.pix)));
-        const x = cp_stride * cp;
-        var y: usize = 0;
-        while (y < height) : (y += 1) {
-            @memcpy(atlas[x + y * width .. x + y * width + width], data[y * stride .. y * stride + width]);
-        }
-    }
-
-    // TODO: use a staging buffer
-    const buffer_info: c.VkBufferCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .size = atlas.len,
-        .usage = c.VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT | c.VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT,
-        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = null,
-    };
-
-    var atlas_buffer: c.VkBuffer = undefined;
-    if (c.vkCreateBuffer(device, &buffer_info, null, &atlas_buffer) != c.VK_SUCCESS) {
-        return error.VkCreateBufferFailed;
-    }
-
-    var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetBufferMemoryRequirements(device, atlas_buffer, &mem_reqs);
-
-    const alloc_info: c.VkMemoryAllocateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = null,
-        .allocationSize = mem_reqs.size,
-        .memoryTypeIndex = findMemoryType(physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
-    };
-
-    var atlas_memory: c.VkDeviceMemory = undefined;
-    if (c.vkAllocateMemory(device, &alloc_info, null, &atlas_memory) != c.VK_SUCCESS) {
-        return error.VkAllocateMemoryFailed;
-    }
-
-    _ = c.vkBindBufferMemory(device, atlas_buffer, atlas_memory, 0);
-
-    var data: []u8 = undefined;
-    data.len = atlas.len;
-    _ = c.vkMapMemory(device, atlas_memory, 0, atlas.len, 0, @ptrCast(&data.ptr));
-    @memcpy(data, atlas);
-    c.vkUnmapMemory(device, atlas_memory);
-
-    var atlas_image: c.VkImage = undefined;
-    const image_info: c.VkImageCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext = null,
-        .imageType = c.VK_IMAGE_TYPE_2D,
-        .extent = .{ .width = width * 128, .height = height, .depth = 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .format = c.VK_FORMAT_R8_SRGB,
-        .tiling = c.VK_IMAGE_TILING_OPTIMAL,
-        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = c.VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT | c.VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
-        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-        .samples = c.VK_SAMPLE_COUNT_1_BIT,
-        .flags = 0,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = null,
-    };
-
-    if (c.vkCreateImage(device, &image_info, null, &atlas_image) != c.VK_SUCCESS) {
-        return error.VkCreateImageFailed;
-    }
-
-    c.vkGetImageMemoryRequirements(device, atlas_image, &mem_reqs);
-
-    const image_alloc_info: c.VkMemoryAllocateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = null,
-        .allocationSize = mem_reqs.size,
-        .memoryTypeIndex = findMemoryType(physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
-    };
-
-    var image_memory: c.VkDeviceMemory = undefined;
-    if (c.vkAllocateMemory(device, &image_alloc_info, null, &image_memory) != c.VK_SUCCESS) {
-        return error.VkAllocateMemoryFailed;
-    }
 
     // {
     //     var i: usize = 0;
@@ -1206,6 +1162,78 @@ fn createGlyphAtlas(gpa: Allocator, physical_device: c.VkPhysicalDevice, device:
     //         std.debug.print("\n", .{});
     //     }
     // }
+
+    const width: u32 = @intCast(gc.ascii['a'].width);
+    const height: u32 = @intCast(gc.ascii['a'].height);
+    const stride: u32 = @intCast(c.pixman_image_get_stride(@ptrCast(gc.ascii['a'].pix)));
+
+    var atlas = try gpa.alloc(u8, width * 128 * height);
+    const cp_stride = width * height;
+    var cp: usize = 0;
+    while (cp < 128) : (cp += 1) {
+        const glyph = gc.ascii[cp];
+        const data: [*]u8 = @ptrCast(c.pixman_image_get_data(@ptrCast(glyph.pix)));
+        const x = cp_stride * cp;
+        var y: usize = 0;
+        while (y < height) : (y += 1) {
+            @memcpy(atlas[x + y * width .. x + y * width + width], data[y * stride .. y * stride + width]);
+        }
+    }
+
+    var staging_buffer: c.VkBuffer = undefined;
+    var staging_memory: c.VkDeviceMemory = undefined;
+    try self.createBuffer(
+        atlas.len,
+        c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &staging_buffer,
+        &staging_memory,
+    );
+
+    var data: []u8 = undefined;
+    data.len = atlas.len;
+    _ = c.vkMapMemory(self.device, staging_memory, 0, atlas.len, 0, @ptrCast(&data.ptr));
+    @memcpy(data, atlas);
+    c.vkUnmapMemory(self.device, staging_memory);
+
+    const image_info: c.VkImageCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = null,
+        .imageType = c.VK_IMAGE_TYPE_2D,
+        .extent = .{ .width = width * 128, .height = height, .depth = 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = c.VK_FORMAT_R8_SRGB,
+        .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .samples = c.VK_SAMPLE_COUNT_1_BIT,
+        .flags = 0,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+    };
+
+    var atlas_image: c.VkImage = undefined;
+    if (c.vkCreateImage(self.device, &image_info, null, &atlas_image) != c.VK_SUCCESS) {
+        return error.VkCreateImageFailed;
+    }
+
+    var mem_reqs: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(self.device, atlas_image, &mem_reqs);
+
+    const image_alloc_info: c.VkMemoryAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = null,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
+
+    var image_memory: c.VkDeviceMemory = undefined;
+    if (c.vkAllocateMemory(self.device, &image_alloc_info, null, &image_memory) != c.VK_SUCCESS) {
+        return error.VkAllocateMemoryFailed;
+    }
+
     // const image_size: c.VkDeviceSize = atlas.len;
 }
 

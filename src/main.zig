@@ -3,42 +3,32 @@ const Wayland = @import("Wayland.zig");
 const Vulkan = @import("Vulkan.zig");
 const pty = @import("pty.zig");
 const GlyphCache = @import("GlyphCache.zig");
+const App = @import("App.zig");
 const Allocator = std.mem.Allocator;
 
-// shared state
-pub const App = struct {
-    gpa: Allocator,
-    wayland: *Wayland,
-    vulkan: *Vulkan,
-
-    running: bool,
-    width: u32,
-    height: u32,
-};
-
 pub fn main() !void {
+    const start = std.time.microTimestamp();
+
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
 
-    var glyph_cache = try GlyphCache.init();
-    defer glyph_cache.deinit();
+    // var glyph_cache = try GlyphCache.init();
+    // defer glyph_cache.deinit();
+    // var glyph_cache: GlyphCache = undefined;
 
-    var app: App = .{
-        .gpa = general_purpose_allocator.allocator(),
-        .wayland = undefined,
-        .vulkan = undefined,
-        .running = false,
-        .width = 0,
-        .height = 0,
-    };
+    const glyph_done = std.time.microTimestamp();
 
-    var wayland = try Wayland.init(&app);
-    defer wayland.deinit();
-    app.wayland = &wayland;
+    var app = try App.init(general_purpose_allocator.allocator());
+    defer app.deinit();
+    try app.configure();
 
-    var vulkan = try Vulkan.init(app.gpa, &app, &glyph_cache);
-    defer vulkan.deinit();
-    app.vulkan = &vulkan;
+    // const wayland_done = std.time.microTimestamp();
+
+    // var vulkan = try Vulkan.init(app.gpa, &app, &glyph_cache);
+    // defer vulkan.deinit();
+    // app.vulkan = &vulkan;
+
+    const vulkan_done = std.time.microTimestamp();
 
     switch (try pty.forkpty()) {
         .parent => |parent| {
@@ -63,24 +53,30 @@ pub fn main() !void {
     }
 
     const lipsum = @embedFile("lipsum.txt");
-    const cells = try app.gpa.alloc(Vulkan.Cell, 212 * 43);
-    var k: usize = 0;
-    var row: u32 = 0;
-    while (row < 43) : (row += 1) {
-        var col: u32 = 0;
-        while (col < 212) : (col += 1) {
-            cells[k] = .{
-                .location = [2]u32{ col, row },
-                .character = lipsum[k],
-            };
-            k += 1;
-        }
-    }
-    const vertex_buffer = try vulkan.createCellAttributesBuffer(cells);
+
+    const end = std.time.microTimestamp();
+    std.debug.print("init time taken: {}\n", .{end - start});
+    std.debug.print("glyph time taken: {}\n", .{glyph_done - start});
+    // std.debug.print("wayland time taken: {}\n", .{wayland_done - glyph_done});
+    std.debug.print("vulkan time taken: {}\n", .{vulkan_done - glyph_done});
 
     app.running = true;
     while (app.running) {
-        if (wayland.display.dispatch() != .SUCCESS) break;
-        try vulkan.drawFrame(&.{vertex_buffer});
+        const cells = try app.gpa.alloc(Vulkan.Cell, app.terminal.cells.cols * app.terminal.cells.rows);
+        var k: usize = 0;
+        var row: u32 = 0;
+        while (row < app.terminal.cells.rows) : (row += 1) {
+            var col: u32 = 0;
+            while (col < app.terminal.cells.cols) : (col += 1) {
+                cells[k] = .{
+                    .location = [2]u32{ col, row },
+                    .character = lipsum[k],
+                };
+                k += 1;
+            }
+        }
+        const vertex_buffer = try app.vulkan.createCellAttributesBuffer(cells);
+        if (app.wayland.display.dispatch() != .SUCCESS) break;
+        try app.vulkan.drawFrame(&.{vertex_buffer});
     }
 }

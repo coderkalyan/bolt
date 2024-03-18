@@ -1,7 +1,7 @@
 const std = @import("std");
 const wayland = @import("wayland");
 const Vulkan = @import("Vulkan.zig");
-const App = @import("main.zig").App;
+const App = @import("App.zig");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 
@@ -10,7 +10,6 @@ var zero: u32 = 0;
 
 pub const Wayland = @This();
 
-app: *App,
 display: *wl.Display,
 registry: *wl.Registry,
 compositor: *wl.Compositor,
@@ -19,8 +18,9 @@ surface: *wl.Surface,
 wm_base: *xdg.WmBase,
 xdg_surface: *xdg.Surface,
 xdg_toplevel: *xdg.Toplevel,
+xdg_configured: bool,
 
-pub fn init(app: *App) !Wayland {
+pub fn init() !Wayland {
     const display = try wl.Display.connect(null);
     const registry = try display.getRegistry();
 
@@ -37,8 +37,7 @@ pub fn init(app: *App) !Wayland {
     const xdg_surface = try wm_base.getXdgSurface(surface);
     const xdg_toplevel = try xdg_surface.getToplevel();
 
-    const state: Wayland = .{
-        .app = app,
+    return .{
         .display = display,
         .registry = registry,
         .compositor = compositor,
@@ -47,18 +46,18 @@ pub fn init(app: *App) !Wayland {
         .wm_base = wm_base,
         .xdg_surface = xdg_surface,
         .xdg_toplevel = xdg_toplevel,
+        .xdg_configured = false,
     };
+}
 
-    var configured: bool = false;
-    state.xdg_surface.setListener(*bool, xdgSurfaceListener, &configured);
+pub fn configureToplevel(state: *Wayland) !void {
+    state.xdg_surface.setListener(*Wayland, xdgSurfaceListener, state);
     state.xdg_toplevel.setTitle("bolt");
     state.xdg_toplevel.setAppId("bolt");
-    state.xdg_toplevel.setListener(*App, xdgToplevelListener, app);
+    state.xdg_toplevel.setListener(*Wayland, xdgToplevelListener, state);
 
     state.surface.commit();
-    while (state.display.dispatch() == .SUCCESS and !configured) {}
-
-    return state;
+    while (state.display.dispatch() == .SUCCESS and !state.xdg_configured) {}
 }
 
 pub fn deinit(state: *Wayland) void {
@@ -110,19 +109,17 @@ fn wmBaseListener(wm_base: *xdg.WmBase, event: xdg.WmBase.Event, _: *u32) void {
 fn xdgSurfaceListener(
     xdg_surface: *xdg.Surface,
     event: xdg.Surface.Event,
-    configured: *bool,
+    state: *Wayland,
 ) void {
     switch (event) {
         .configure => |configure| {
-            // TODO: when do we need to re-configure?
             xdg_surface.ackConfigure(configure.serial);
-            configured.* = true;
 
-            // if (configured) {
-            //     state.surface.commit();
-            // } else {
-            //     state.configured = true;
-            // }
+            if (state.xdg_configured) {
+                state.surface.commit();
+            } else {
+                state.xdg_configured = true;
+            }
         },
     }
 }
@@ -130,21 +127,15 @@ fn xdgSurfaceListener(
 fn xdgToplevelListener(
     _: *xdg.Toplevel,
     event: xdg.Toplevel.Event,
-    app: *App,
+    state: *Wayland,
 ) void {
+    const app = @fieldParentPtr(App, "wayland", state);
+
     switch (event) {
         .configure => |configure| {
-            app.width = @intCast(configure.width);
-            app.height = @intCast(configure.height);
+            app.configureTerminal(@intCast(configure.width), @intCast(configure.height));
 
-            if (app.width == 0 or app.height == 0) {
-                // TODO: probably choose a nicer initial size
-                // if no hint is given
-                app.width = 100;
-                app.height = 100;
-            }
-
-            if (app.running and app.width > 0 and app.height > 0) {
+            if (app.running) {
                 app.vulkan.deinitBufferObjects();
                 app.vulkan.initBufferObjects() catch return;
             }
