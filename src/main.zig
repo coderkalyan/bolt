@@ -70,9 +70,10 @@ pub fn main() !void {
         var col: u32 = 0;
         while (col < 212) : (col += 1) {
             cells[k] = .{
-                .location = [2]u32{ row, col },
+                .location = [2]u32{ col, row },
                 .character = lipsum[k],
             };
+            k += 1;
         }
     }
     const vertex_buffer = try vulkan.createCellAttributesBuffer(cells);

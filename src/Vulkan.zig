@@ -668,14 +668,21 @@ fn createGraphicsPipeline(
         .blendConstants = .{ 0.0, 0.0, 0.0, 0.0 },
     };
 
+    comptime std.debug.assert(@sizeOf(Terminal) <= 128);
+    const push_info: c.VkPushConstantRange = .{
+        .offset = 0,
+        .size = @sizeOf(Terminal),
+        .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+    };
+
     const pipeline_layout_info: c.VkPipelineLayoutCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext = null,
         .flags = 0,
         .setLayoutCount = 0,
         .pSetLayouts = null,
-        .pushConstantRangeCount = 0,
-        .pPushConstantRanges = null,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_info,
     };
 
     var pipeline_layout: c.VkPipelineLayout = undefined;
@@ -846,8 +853,21 @@ fn recordCommandBuffer(
     const offsets: []const c.VkDeviceSize = &.{0};
     c.vkCmdBindVertexBuffers(command_buffer, 0, @intCast(vertex_buffers.len), vertex_buffers.ptr, offsets.ptr);
 
+    const cell_width: u32 = 10;
+    const cell_height: u32 = 25;
+    const cells_x = self.app.width / cell_width;
+    const cells_y = self.app.height / cell_height;
+    const terminal: Terminal = .{
+        .size = .{ .width = self.app.width, .height = self.app.height },
+        .cells = .{ .rows = cells_x, .cols = cells_y },
+        .cell_size = .{ .width = cell_width, .height = cell_height },
+        .offset = .{ .x = 0, .y = 0 },
+    };
+
+    c.vkCmdPushConstants(command_buffer, self.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Terminal), &terminal);
+
     // TODO: find the number of instances properly
-    c.vkCmdDraw(command_buffer, 6, 212 * 43, 0, 0);
+    c.vkCmdDraw(command_buffer, 6, cells_x * cells_y, 0, 0);
 
     c.vkCmdEndRenderPass(command_buffer);
     if (c.vkEndCommandBuffer(command_buffer) != c.VK_SUCCESS) {
@@ -945,7 +965,7 @@ pub fn drawFrame(self: *Vulkan, vertex_buffers: []const c.VkBuffer) !void {
 pub const Cell = struct {
     // row, col
     location: [2]u32,
-    character: u8,
+    character: u32,
 
     pub fn bindingDescription() c.VkVertexInputBindingDescription {
         return .{
@@ -966,11 +986,27 @@ pub const Cell = struct {
             .{
                 .binding = 0,
                 .location = 1,
-                .format = c.VK_FORMAT_R8_UINT,
+                .format = c.VK_FORMAT_R32_UINT,
                 .offset = @offsetOf(Cell, "character"),
             },
         };
     }
+};
+
+// mirrored to GPU via push constant
+pub const Terminal = struct {
+    // these can be smaller if necessary but we have the space
+    // and shrinking them doesn't help much and causes potential problems
+    // with glsl (which likes everything to be 32 bits)
+
+    // window extent (in pixels)
+    size: struct { width: u32, height: u32 },
+    // number of cells
+    cells: struct { cols: u32, rows: u32 },
+    // cell size (in pixels)
+    cell_size: struct { width: u32, height: u32 },
+    // offset to first cell corner
+    offset: struct { x: u32, y: u32 },
 };
 
 pub fn createCellAttributesBuffer(self: *Vulkan, cells: []const Cell) !c.VkBuffer {
