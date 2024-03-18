@@ -1,6 +1,5 @@
 const std = @import("std");
 const Scanner = @import("lib/zig-wayland/build.zig").Scanner;
-// const vkgen = @import("lib/vulkan-zig/generator/index.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -14,8 +13,6 @@ pub fn build(b: *std.Build) void {
     scanner.generate("wl_seat", 4);
     scanner.generate("xdg_wm_base", 3);
 
-    // const vulkan = vkgen.VkGenerateStep.create(b, "/usr/share/vulkan/registry/vk.xml");
-
     const exe = b.addExecutable(.{
         .name = "bolt",
         .root_source_file = .{ .path = "src/main.zig" },
@@ -24,10 +21,11 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.addModule("wayland", wayland);
-    // exe.addModule("vulkan", vulkan.getModule());
     exe.linkLibC();
     exe.linkSystemLibrary("wayland-client");
     exe.linkSystemLibrary("vulkan");
+    exe.linkSystemLibrary("fcft");
+    exe.linkSystemLibrary("pixman-1");
 
     scanner.addCSource(exe);
 
