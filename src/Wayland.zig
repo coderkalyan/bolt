@@ -137,7 +137,14 @@ fn xdgToplevelListener(
             app.width = @intCast(configure.width);
             app.height = @intCast(configure.height);
 
-            if (app.running) {
+            if (app.width == 0 or app.height == 0) {
+                // TODO: probably choose a nicer initial size
+                // if no hint is given
+                app.width = 100;
+                app.height = 100;
+            }
+
+            if (app.running and app.width > 0 and app.height > 0) {
                 app.vulkan.deinitBufferObjects();
                 app.vulkan.initBufferObjects() catch return;
             }

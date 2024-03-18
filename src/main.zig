@@ -62,9 +62,24 @@ pub fn main() !void {
         },
     }
 
+    const lipsum = @embedFile("lipsum.txt");
+    const cells = try app.gpa.alloc(Vulkan.Cell, 212 * 43);
+    var k: usize = 0;
+    var row: u32 = 0;
+    while (row < 43) : (row += 1) {
+        var col: u32 = 0;
+        while (col < 212) : (col += 1) {
+            cells[k] = .{
+                .location = [2]u32{ row, col },
+                .character = lipsum[k],
+            };
+        }
+    }
+    const vertex_buffer = try vulkan.createCellAttributesBuffer(cells);
+
     app.running = true;
     while (app.running) {
         if (wayland.display.dispatch() != .SUCCESS) break;
-        try vulkan.drawFrame();
+        try vulkan.drawFrame(&.{vertex_buffer});
     }
 }

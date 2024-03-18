@@ -39,7 +39,6 @@ const SyncObjects = struct {
 
 gpa: Allocator,
 app: *App,
-// display: *const Wayland,
 instance: c.VkInstance,
 surface: c.VkSurfaceKHR,
 physical_device: c.VkPhysicalDevice,
@@ -104,8 +103,6 @@ pub fn init(gpa: Allocator, app: *App, gc: *GlyphCache) !Vulkan {
     try vulkan.initBufferObjects();
 
     return vulkan;
-    // try createGlyphAtlas(gpa, physical_device, device, gc);
-    // try recordCommandBuffer(command_buffer, render_pass, framebuffers, extent, )
 }
 
 pub fn deinit(self: *Vulkan) void {
@@ -546,7 +543,6 @@ fn createGraphicsPipeline(
     self: *Vulkan,
 ) !struct { layout: c.VkPipelineLayout, pipeline: c.VkPipeline } {
     const device = self.device;
-    const extent = self.swapchain.extent;
     const render_pass = self.render_pass;
 
     // TODO: probably shouldn't do this
@@ -581,6 +577,26 @@ fn createGraphicsPipeline(
         frag_shader_stage_info,
     };
 
+    const binding_description = comptime Cell.bindingDescription();
+    const attribute_descriptions = &(comptime Cell.attributeDescriptions());
+    const vertex_input_info: c.VkPipelineVertexInputStateCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding_description,
+        .vertexAttributeDescriptionCount = attribute_descriptions.len,
+        .pVertexAttributeDescriptions = attribute_descriptions.ptr,
+    };
+
+    const input_assembly: c.VkPipelineInputAssemblyStateCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = c.VK_FALSE,
+    };
+
     const dynamic_states: []const c.VkDynamicState = &.{
         c.VK_DYNAMIC_STATE_VIEWPORT,
         c.VK_DYNAMIC_STATE_SCISSOR,
@@ -593,43 +609,14 @@ fn createGraphicsPipeline(
         .pDynamicStates = dynamic_states.ptr,
     };
 
-    const vertex_input_info: c.VkPipelineVertexInputStateCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = null,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = null,
-    };
-
-    const input_assembly: c.VkPipelineInputAssemblyStateCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .primitiveRestartEnable = c.VK_FALSE,
-    };
-
-    const viewport: c.VkViewport = .{
-        .x = 0,
-        .y = 0,
-        .width = @floatFromInt(extent.width),
-        .height = @floatFromInt(extent.height),
-        .minDepth = 0,
-        .maxDepth = 1.0,
-    };
-    const scissor: c.VkRect2D = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent };
-
-    // TODO: we probably don't need dynamic viewport state here
     const viewport_state: c.VkPipelineViewportStateCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .pNext = null,
         .flags = 0,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = null,
         .scissorCount = 1,
-        .pScissors = &scissor,
+        .pScissors = null,
     };
 
     const rasterizer: c.VkPipelineRasterizationStateCreateInfo = .{
@@ -808,6 +795,7 @@ fn recordCommandBuffer(
     self: *Vulkan,
     command_buffer: c.VkCommandBuffer,
     image_index: u32,
+    vertex_buffers: []const c.VkBuffer,
 ) !void {
     const render_pass = self.render_pass;
     const framebuffers = self.framebuffers;
@@ -855,7 +843,11 @@ fn recordCommandBuffer(
     };
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
-    c.vkCmdDraw(command_buffer, 6, 1, 0, 0);
+    const offsets: []const c.VkDeviceSize = &.{0};
+    c.vkCmdBindVertexBuffers(command_buffer, 0, @intCast(vertex_buffers.len), vertex_buffers.ptr, offsets.ptr);
+
+    // TODO: find the number of instances properly
+    c.vkCmdDraw(command_buffer, 6, 212 * 43, 0, 0);
 
     c.vkCmdEndRenderPass(command_buffer);
     if (c.vkEndCommandBuffer(command_buffer) != c.VK_SUCCESS) {
@@ -889,7 +881,7 @@ fn createSyncObjects(device: c.VkDevice) !SyncObjects {
     return sync;
 }
 
-pub fn drawFrame(self: *Vulkan) !void {
+pub fn drawFrame(self: *Vulkan, vertex_buffers: []const c.VkBuffer) !void {
     _ = c.vkWaitForFences(self.device, 1, &self.sync_objects.in_flight, c.VK_TRUE, std.math.maxInt(u64));
     _ = c.vkResetFences(self.device, 1, &self.sync_objects.in_flight);
 
@@ -913,6 +905,7 @@ pub fn drawFrame(self: *Vulkan) !void {
     try self.recordCommandBuffer(
         self.command_buffer,
         image_index,
+        vertex_buffers,
     );
 
     const wait_semaphores: []const c.VkSemaphore = &.{self.sync_objects.image_available};
@@ -949,16 +942,79 @@ pub fn drawFrame(self: *Vulkan) !void {
     _ = c.vkQueuePresentKHR(self.presentation_queue, &present_info);
 }
 
-// pub fn recreateSwapchain(self: *Vulkan) !void {
-//     _ = c.vkDeviceWaitIdle(self.device);
-//
-//     self.destroySwapChain();
-// TODO: we may potentially need to recreate the render pass here, but
-// unlikely so we skip for now
-// TODO: recreate swap chain while old frames in flight
-// self.swapchain = try createSwapchain(self.arena, self.physical_device, self.device, self.surface, self.queue_families, self.display);
-// self.framebuffers = try createFramebuffers(self.arena, self.device, self.swapchain.image_views, self.render_pass, self.swapchain.extent);
-// }
+pub const Cell = struct {
+    // row, col
+    location: [2]u32,
+    character: u8,
+
+    pub fn bindingDescription() c.VkVertexInputBindingDescription {
+        return .{
+            .binding = 0,
+            .stride = @sizeOf(Cell),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_INSTANCE,
+        };
+    }
+
+    pub fn attributeDescriptions() [2]c.VkVertexInputAttributeDescription {
+        return [2]c.VkVertexInputAttributeDescription{
+            .{
+                .binding = 0,
+                .location = 0,
+                .format = c.VK_FORMAT_R32G32_UINT,
+                .offset = @offsetOf(Cell, "location"),
+            },
+            .{
+                .binding = 0,
+                .location = 1,
+                .format = c.VK_FORMAT_R8_UINT,
+                .offset = @offsetOf(Cell, "character"),
+            },
+        };
+    }
+};
+
+pub fn createCellAttributesBuffer(self: *Vulkan, cells: []const Cell) !c.VkBuffer {
+    const buffer_info: c.VkBufferCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .size = @sizeOf(Cell) * cells.len,
+        .usage = c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+    };
+
+    var buffer: c.VkBuffer = undefined;
+    if (c.vkCreateBuffer(self.device, &buffer_info, null, &buffer) != c.VK_SUCCESS) {
+        return error.VkCreateBufferFailed;
+    }
+
+    var requirements: c.VkMemoryRequirements = undefined;
+    c.vkGetBufferMemoryRequirements(self.device, buffer, &requirements);
+
+    const alloc_info: c.VkMemoryAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = null,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = findMemoryType(self.physical_device, requirements.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    var memory: c.VkDeviceMemory = undefined;
+    if (c.vkAllocateMemory(self.device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
+        return error.VkAllocateMemoryFailed;
+    }
+
+    _ = c.vkBindBufferMemory(self.device, buffer, memory, 0);
+
+    var data: []Cell = undefined;
+    data.len = cells.len;
+    _ = c.vkMapMemory(self.device, memory, 0, buffer_info.size, 0, @ptrCast(&data.ptr));
+    @memcpy(data, cells);
+    c.vkUnmapMemory(self.device, memory);
+
+    return buffer;
+}
 
 fn createGlyphAtlas(gpa: Allocator, physical_device: c.VkPhysicalDevice, device: c.VkDevice, gc: *const GlyphCache) !void {
     // for (gc.ascii) |glyph| {
