@@ -13,10 +13,12 @@ const c = @cImport({
 
 const Vulkan = @This();
 const cstrings = []const [*:0]const u8;
+
 const QueueFamilies = struct {
     graphics: u32,
     presentation: u32,
 };
+
 const SwapChainSupport = struct {
     capabilities: c.VkSurfaceCapabilitiesKHR,
     formats: []const c.VkSurfaceFormatKHR,

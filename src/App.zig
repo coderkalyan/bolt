@@ -30,6 +30,11 @@ pub const Terminal = struct {
     offset: struct { x: u32, y: u32 },
 };
 
+pub const Cell = struct {
+    glyph: u32, // index into the glyph cache
+    style: u32, // index into the style cache
+};
+
 pub fn init(gpa: Allocator) !App {
     const app: App = .{
         .gpa = gpa,
