@@ -59,23 +59,23 @@ pub fn main() !void {
     std.debug.print("glyph time taken: {}\n", .{glyph_done - start});
     // std.debug.print("wayland time taken: {}\n", .{wayland_done - glyph_done});
     std.debug.print("vulkan time taken: {}\n", .{vulkan_done - glyph_done});
+    const cells = try app.gpa.alloc(Vulkan.Cell, app.terminal.cells.cols * app.terminal.cells.rows);
+    var k: usize = 0;
+    var row: u32 = 0;
+    while (row < app.terminal.cells.rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < app.terminal.cells.cols) : (col += 1) {
+            cells[k] = .{
+                .location = [2]u32{ col, row },
+                .character = lipsum[k],
+            };
+            k += 1;
+        }
+    }
+    const vertex_buffer = try app.vulkan.createCellAttributesBuffer(cells);
 
     app.running = true;
     while (app.running) {
-        const cells = try app.gpa.alloc(Vulkan.Cell, app.terminal.cells.cols * app.terminal.cells.rows);
-        var k: usize = 0;
-        var row: u32 = 0;
-        while (row < app.terminal.cells.rows) : (row += 1) {
-            var col: u32 = 0;
-            while (col < app.terminal.cells.cols) : (col += 1) {
-                cells[k] = .{
-                    .location = [2]u32{ col, row },
-                    .character = lipsum[k],
-                };
-                k += 1;
-            }
-        }
-        const vertex_buffer = try app.vulkan.createCellAttributesBuffer(cells);
         if (app.wayland.display.dispatch() != .SUCCESS) break;
         try app.vulkan.drawFrame(&.{vertex_buffer});
     }
