@@ -51,6 +51,7 @@ pub fn init() !Wayland {
 }
 
 pub fn configureToplevel(state: *Wayland) !void {
+    state.surface.setListener(*Wayland, wlSurfaceListener, state);
     state.xdg_surface.setListener(*Wayland, xdgSurfaceListener, state);
     state.xdg_toplevel.setTitle("bolt");
     state.xdg_toplevel.setAppId("bolt");
@@ -106,6 +107,28 @@ fn wmBaseListener(wm_base: *xdg.WmBase, event: xdg.WmBase.Event, _: *u32) void {
     }
 }
 
+fn wlSurfaceListener(
+    surface: *wl.Surface,
+    event: wl.Surface.Event,
+    state: *Wayland,
+) void {
+    // std.debug.print("surface listener: {}\n", .{event});
+    switch (event) {
+        // .enter => |enter| {
+        //     std.debug.print("enter: {}\n", .{enter});
+        // app.configureTerminal(@intCast(configure.width), @intCast(configure.height));
+        //
+        // if (app.running) {
+        //     app.vulkan.deinitBufferObjects();
+        //     app.vulkan.initBufferObjects() catch return;
+        // }
+        // },
+        else => {},
+    }
+    _ = surface;
+    _ = state;
+}
+
 fn xdgSurfaceListener(
     xdg_surface: *xdg.Surface,
     event: xdg.Surface.Event,
@@ -133,7 +156,7 @@ fn xdgToplevelListener(
 
     switch (event) {
         .configure => |configure| {
-            app.configureTerminal(@intCast(configure.width), @intCast(configure.height));
+            app.configureTerminal(@intCast(configure.width), @intCast(configure.height)) catch return;
 
             if (app.running) {
                 app.vulkan.deinitBufferObjects();
@@ -143,6 +166,7 @@ fn xdgToplevelListener(
         .close => {
             app.running = false;
         },
+        .configure_bounds, .wm_capabilities => {},
     }
 }
 
@@ -159,15 +183,15 @@ fn registryListener(
     switch (event) {
         .global => |global| {
             if (orderZ(u8, global.interface, wl.Seat.getInterface().name) == .eq) {
-                const seat = registry.bind(global.name, wl.Seat, 1) catch return;
+                const seat = registry.bind(global.name, wl.Seat, 8) catch return;
                 seat.setListener(*u32, seatListener, &zero);
             } else if (orderZ(u8, global.interface, wl.Compositor.getInterface().name) == .eq) {
-                bindings.compositor = registry.bind(global.name, wl.Compositor, 1) catch return;
+                bindings.compositor = registry.bind(global.name, wl.Compositor, 6) catch return;
             } else if (orderZ(u8, global.interface, xdg.WmBase.getInterface().name) == .eq) {
-                const wm_base = registry.bind(global.name, xdg.WmBase, 1) catch return;
+                const wm_base = registry.bind(global.name, xdg.WmBase, 2) catch return;
                 wm_base.setListener(*u32, wmBaseListener, &zero);
                 bindings.wm_base = wm_base;
-            }
+            } else if (orderZ(u8, global.interface, wl.Output.getInterface().name) == .eq) {}
         },
         .global_remove => {},
     }

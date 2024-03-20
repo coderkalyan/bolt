@@ -58,8 +58,6 @@ descriptor_set_layout: c.VkDescriptorSetLayout,
 descriptor_set: c.VkDescriptorSet,
 
 swapchain: Swapchain,
-// framebuffers: []const c.VkFramebuffer,
-// render_pass: c.VkRenderPass,
 pipeline_layout: c.VkPipelineLayout,
 pipeline: c.VkPipeline,
 command_buffer: c.VkCommandBuffer,
@@ -82,24 +80,34 @@ pub fn init(app: *App) !Vulkan {
     const physical_device = try selectPhysicalDevice(gpa, instance, surface);
     const queue_families = try findQueueFamilies(gpa, physical_device, surface);
     const device = try createLogicalDevice(gpa, physical_device, queue_families);
-    // const command_pool = try createCommandPool(device, queue_families.graphics);
     const command_pool = try createCommandPool(device, queue_families.compute);
     const sync_objects = try createSyncObjects(device);
     const descriptor_pool = try createDescriptorPool(device);
 
-    const layout_binding: c.VkDescriptorSetLayoutBinding = .{
+    const atlas_layout_binding: c.VkDescriptorSetLayoutBinding = .{
         .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pImmutableSamplers = null,
+        .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+    const dest_layout_binding: c.VkDescriptorSetLayoutBinding = .{
+        .binding = 1,
         .descriptorCount = 1,
         .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         .pImmutableSamplers = null,
         .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
     };
+    const bindings: []const c.VkDescriptorSetLayoutBinding = &.{
+        atlas_layout_binding,
+        dest_layout_binding,
+    };
     const layout_info: c.VkDescriptorSetLayoutCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .bindingCount = 1,
-        .pBindings = &layout_binding,
+        .bindingCount = bindings.len,
+        .pBindings = bindings.ptr,
     };
     var descriptor_set_layout: c.VkDescriptorSetLayout = undefined;
     if (c.vkCreateDescriptorSetLayout(device, &layout_info, null, &descriptor_set_layout) != c.VK_SUCCESS) {
@@ -166,21 +174,13 @@ pub fn deinit(self: *Vulkan) void {
 
 pub fn initBufferObjects(self: *Vulkan) !void {
     self.swapchain = try self.createSwapchain();
-    // TODO: small chance that the format changed and render pass
-    // needs to be recreated
-    // if (self.render_pass == null) {
     if (self.pipeline_layout == null) {
-        // self.render_pass = try self.createRenderPass();
-        const pipeline_info = try self.createGraphicsPipeline();
+        const pipeline_info = try self.createRenderPipeline();
         self.pipeline_layout = pipeline_info.layout;
         self.pipeline = pipeline_info.pipeline;
     }
 
-    // self.framebuffers = try self.createFramebuffers();
     self.command_buffer = try self.createCommandBuffer();
-
-    // TODO: move this
-    try self.createGlyphAtlas();
 }
 
 fn createInstance(
@@ -193,6 +193,7 @@ fn createInstance(
     const layers: cstrings = &.{
         "VK_LAYER_KHRONOS_validation",
     };
+
     const create_info: c.VkInstanceCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = null,
@@ -235,14 +236,17 @@ fn selectPhysicalDevice(
     surface: c.VkSurfaceKHR,
 ) !c.VkPhysicalDevice {
     var device_count: u32 = 0;
-    _ = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
-    if (device_count == 0) {
+    var result = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
+    if (result != c.VK_SUCCESS or device_count == 0) {
         return error.NoValidPhysicalDevice;
     }
 
     const devices = try gpa.alloc(c.VkPhysicalDevice, device_count);
     defer gpa.free(devices);
-    _ = c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr);
+    result = c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr);
+    if (result != c.VK_SUCCESS) {
+        return error.NoValidPhysicalDevice;
+    }
 
     var chosen: c.VkPhysicalDevice = null;
     for (devices) |device| {
@@ -473,10 +477,6 @@ fn createSwapchain(self: *Vulkan) !Swapchain {
 pub fn deinitBufferObjects(self: *Vulkan) void {
     _ = c.vkDeviceWaitIdle(self.device);
 
-    // for (self.framebuffers) |framebuffer| {
-    //     c.vkDestroyFramebuffer(self.device, framebuffer, null);
-    // }
-    // self.gpa.free(self.framebuffers);
     for (self.swapchain.image_views) |image_view| {
         c.vkDestroyImageView(self.device, image_view, null);
     }
@@ -538,66 +538,7 @@ fn createImageViews(
     return image_views;
 }
 
-fn createRenderPass(self: *Vulkan) !c.VkRenderPass {
-    const color_attachment: c.VkAttachmentDescription = .{
-        .flags = 0,
-        .format = self.swapchain.format,
-        .samples = c.VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    };
-    const color_attachment_ref: c.VkAttachmentReference = .{
-        .attachment = 0,
-        .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    };
-    const subpass: c.VkSubpassDescription = .{
-        .flags = 0,
-        .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_attachment_ref,
-        .inputAttachmentCount = 0,
-        .pInputAttachments = null,
-        .pResolveAttachments = null,
-        .preserveAttachmentCount = 0,
-        .pPreserveAttachments = null,
-        .pDepthStencilAttachment = null,
-    };
-
-    const dependency: c.VkSubpassDependency = .{
-        .srcSubpass = c.VK_SUBPASS_EXTERNAL,
-        .dstSubpass = 0,
-        .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = 0,
-        .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        .dependencyFlags = 0,
-    };
-
-    const create_info: c.VkRenderPassCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .attachmentCount = 1,
-        .pAttachments = &color_attachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-        .dependencyCount = 1,
-        .pDependencies = &dependency,
-    };
-
-    var render_pass: c.VkRenderPass = undefined;
-    if (c.vkCreateRenderPass(self.device, &create_info, null, &render_pass) != c.VK_SUCCESS) {
-        return error.VkCreateRenderPassFailed;
-    }
-
-    return render_pass;
-}
-
-fn createGraphicsPipeline(
+fn createRenderPipeline(
     self: *Vulkan,
 ) !struct { layout: c.VkPipelineLayout, pipeline: c.VkPipeline } {
     const device = self.device;
@@ -677,31 +618,6 @@ fn createShaderModule(device: c.VkDevice, code: []align(4) const u8) !c.VkShader
     return module;
 }
 
-fn createFramebuffers(
-    self: *Vulkan,
-) ![]const c.VkFramebuffer {
-    const framebuffers = try self.gpa.alloc(c.VkFramebuffer, self.swapchain.image_views.len);
-    for (self.swapchain.image_views, 0..) |image_view, i| {
-        const create_info: c.VkFramebufferCreateInfo = .{
-            .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .renderPass = self.render_pass,
-            .attachmentCount = 1,
-            .pAttachments = &image_view,
-            .width = self.swapchain.extent.width,
-            .height = self.swapchain.extent.height,
-            .layers = 1,
-        };
-
-        if (c.vkCreateFramebuffer(self.device, &create_info, null, &framebuffers[i]) != c.VK_SUCCESS) {
-            return error.VkCreateFramebufferFailed;
-        }
-    }
-
-    return framebuffers;
-}
-
 fn createCommandPool(device: c.VkDevice, graphics_family: u32) !c.VkCommandPool {
     const create_info: c.VkCommandPoolCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -759,25 +675,44 @@ fn recordCommandBuffer(
 
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline);
 
+    // const atlas_image = try self.createGlyphAtlas();
     // TODO: move
-    const storage_image: c.VkDescriptorImageInfo = .{
-        .sampler = @ptrCast(c.VK_NULL_HANDLE),
-        .imageView = self.swapchain.image_views[image_index],
-        .imageLayout = c.VK_IMAGE_LAYOUT_GENERAL,
-    };
-    const descriptor_write: c.VkWriteDescriptorSet = .{
+    // const descriptor_dest1: c.VkWriteDescriptorSet = .{
+    //     .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+    //     .pNext = null,
+    //     .dstSet = self.descriptor_set,
+    //     .dstBinding = 0,
+    //     .dstArrayElement = 0,
+    //     .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    //     .descriptorCount = 1,
+    //     .pBufferInfo = &c.VkDescriptorBufferInfo{
+    //         .buffer = atlas_image,
+    //         .offset = 0,
+    //         .range = 7168,
+    //     },
+    //     .pImageInfo = null,
+    //     .pTexelBufferView = null,
+    // };
+    const descriptor_dest2: c.VkWriteDescriptorSet = .{
         .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .pNext = null,
         .dstSet = self.descriptor_set,
-        .dstBinding = 0,
+        .dstBinding = 1,
         .dstArrayElement = 0,
         .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         .descriptorCount = 1,
         .pBufferInfo = null,
-        .pImageInfo = &storage_image,
+        .pImageInfo = &c.VkDescriptorImageInfo{
+            .sampler = @ptrCast(c.VK_NULL_HANDLE),
+            .imageView = self.swapchain.image_views[image_index],
+            .imageLayout = c.VK_IMAGE_LAYOUT_GENERAL,
+        },
         .pTexelBufferView = null,
     };
-    c.vkUpdateDescriptorSets(self.device, 1, &descriptor_write, 0, null);
+    // const sets: []const c.VkWriteDescriptorSet = &.{ descriptor_dest1, descriptor_dest2 };
+    const sets: []const c.VkWriteDescriptorSet = &.{descriptor_dest2};
+    c.vkUpdateDescriptorSets(self.device, @intCast(sets.len), sets.ptr, 0, null);
+
     c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline_layout, 0, 1, &self.descriptor_set, 0, 0);
 
     c.vkCmdPushConstants(command_buffer, self.pipeline_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(App.Terminal), &self.app.terminal);
@@ -878,17 +813,24 @@ fn createSyncObjects(device: c.VkDevice) !SyncObjects {
 }
 
 fn createDescriptorPool(device: c.VkDevice) !c.VkDescriptorPool {
-    const pool_size: c.VkDescriptorPoolSize = .{
+    const pool_size1: c.VkDescriptorPoolSize = .{
         .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         .descriptorCount = 1,
+    };
+    const pool_size2: c.VkDescriptorPoolSize = .{
+        .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+    };
+    const pool_sizes: []const c.VkDescriptorPoolSize = &.{
+        pool_size1, pool_size2,
     };
 
     const pool_info: c.VkDescriptorPoolCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .poolSizeCount = 1,
-        .pPoolSizes = &pool_size,
+        .poolSizeCount = pool_sizes.len,
+        .pPoolSizes = pool_sizes.ptr,
         .maxSets = 1,
     };
 
@@ -1104,7 +1046,7 @@ fn copyBuffer(self: *Vulkan, src: c.VkBuffer, dest: c.VkBuffer, size: c.VkDevice
     _ = c.vkQueueWaitIdle(self.graphics_queue);
 }
 
-fn createGlyphAtlas(self: *Vulkan) !void {
+fn createGlyphAtlas(self: *Vulkan) !c.VkBuffer {
     const gpa = self.gpa;
     const app = @fieldParentPtr(App, "vulkan", self);
     const gc = &app.glyph_cache;
@@ -1190,7 +1132,7 @@ fn createGlyphAtlas(self: *Vulkan) !void {
     var staging_memory: c.VkDeviceMemory = undefined;
     try self.createBuffer(
         atlas.len,
-        c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, //TRANSFER_SRC_BIT,
         c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &staging_buffer,
         &staging_memory,
@@ -1199,46 +1141,111 @@ fn createGlyphAtlas(self: *Vulkan) !void {
     var data: []u8 = undefined;
     data.len = atlas.len;
     _ = c.vkMapMemory(self.device, staging_memory, 0, atlas.len, 0, @ptrCast(&data.ptr));
-    @memcpy(data, atlas);
+    // @memcpy(data, atlas);
+    @memset(data, 255);
     c.vkUnmapMemory(self.device, staging_memory);
 
-    const image_info: c.VkImageCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext = null,
-        .imageType = c.VK_IMAGE_TYPE_2D,
-        .extent = .{ .width = width * 128, .height = height, .depth = 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .format = c.VK_FORMAT_R8_SRGB,
-        .tiling = c.VK_IMAGE_TILING_OPTIMAL,
-        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
-        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-        .samples = c.VK_SAMPLE_COUNT_1_BIT,
-        .flags = 0,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = null,
-    };
+    return staging_buffer;
 
-    var atlas_image: c.VkImage = undefined;
-    if (c.vkCreateImage(self.device, &image_info, null, &atlas_image) != c.VK_SUCCESS) {
-        return error.VkCreateImageFailed;
-    }
+    // const image_info: c.VkImageCreateInfo = .{
+    //     .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+    //     .pNext = null,
+    //     .imageType = c.VK_IMAGE_TYPE_2D,
+    //     .extent = .{ .width = width * 128, .height = height, .depth = 1 },
+    //     .mipLevels = 1,
+    //     .arrayLayers = 1,
+    //     .format = c.VK_FORMAT_R8_UINT,
+    //     .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+    //     .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+    //     .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+    //     .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+    //     .samples = c.VK_SAMPLE_COUNT_1_BIT,
+    //     .flags = 0,
+    //     .queueFamilyIndexCount = 0,
+    //     .pQueueFamilyIndices = null,
+    // };
+    //
+    // var atlas_image: c.VkImage = undefined;
+    // if (c.vkCreateImage(self.device, &image_info, null, &atlas_image) != c.VK_SUCCESS) {
+    //     return error.VkCreateImageFailed;
+    // }
+    //
+    // var mem_reqs: c.VkMemoryRequirements = undefined;
+    // c.vkGetImageMemoryRequirements(self.device, atlas_image, &mem_reqs);
+    //
+    // const image_alloc_info: c.VkMemoryAllocateInfo = .{
+    //     .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    //     .pNext = null,
+    //     .allocationSize = mem_reqs.size,
+    //     .memoryTypeIndex = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    // };
+    //
+    // var image_memory: c.VkDeviceMemory = undefined;
+    // if (c.vkAllocateMemory(self.device, &image_alloc_info, null, &image_memory) != c.VK_SUCCESS) {
+    //     return error.VkAllocateMemoryFailed;
+    // }
+    //
+    // c.vkBindImageMemory(self.device, atlas_image, image_memory, 0);
 
-    var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(self.device, atlas_image, &mem_reqs);
-
-    const image_alloc_info: c.VkMemoryAllocateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = null,
-        .allocationSize = mem_reqs.size,
-        .memoryTypeIndex = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
-    };
-
-    var image_memory: c.VkDeviceMemory = undefined;
-    if (c.vkAllocateMemory(self.device, &image_alloc_info, null, &image_memory) != c.VK_SUCCESS) {
-        return error.VkAllocateMemoryFailed;
-    }
+    // const cb_alloc_info: c.vkCommandBuffer = .{
+    //     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    //     .pNext = null,
+    //     .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    //     .commandPool = self.command_pool,
+    //     .commandBufferCount = 1,
+    // };
+    //
+    // var command_buffer: c.VkCommandbuffer = undefined;
+    // _ = c.vkAllocateCommandBuffers(self.device, &cb_alloc_info, &command_buffer);
+    // defer c.vkFreeCommandBuffers(self.device, self.command_pool, 1, &command_buffer);
+    //
+    // c.vkBeginCommandBuffer(command_buffer, &.{
+    //     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    //     .pNext = null,
+    //     .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    // });
+    //
+    // c.vkCmdPipelineBarrier(
+    //     command_buffer,
+    //     c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    //     c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    //     c.VK_DEPENDENCY_BY_REGION_BIT, // TODO: correct?
+    //     0,
+    //     null,
+    //     0,
+    //     null,
+    //     1,
+    //     &@as(c.VkImageMemoryBarrier, .{
+    //         .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+    //         .pNext = null,
+    //         .srcAccessMask = 0,
+    //         .dstAccessMask = 0,
+    //         .oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+    //         .newLayout = c.VK_IMAGE_LAYOUT_GENERAL,
+    //         .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+    //         .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+    //         .image = atlas_image,
+    //         .subresourceRange = .{
+    //             .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+    //             .baseMipLevel = 0,
+    //             .levelCount = 1,
+    //             .baseArrayLayer = 0,
+    //             .layerCount = 1,
+    //         },
+    //     }),
+    // );
+    // _ = c.vkQueueSubmit(self.graphics_queue, 1, &.{
+    //     .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    //     .pNext = null,
+    //     .commandBufferCount = 1,
+    //     .pCommandBuffers = &command_buffer,
+    //     .waitSemaphoreCount = 0,
+    //     .pWaitSemaphores = null,
+    //     .signalSemaphoreCount = 0,
+    //     .pSignalSemaphores = null,
+    //     .pWaitDstStageMask = null,
+    // }, @ptrCast(c.VK_NULL_HANDLE));
+    // _ = c.vkQueueWaitIdle(self.graphics_queue);
 
     // const image_size: c.VkDeviceSize = atlas.len;
 }

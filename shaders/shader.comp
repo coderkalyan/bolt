@@ -1,6 +1,11 @@
 #version 450
 
-layout(binding = 0, rgba8) uniform writeonly image2D dest;
+// TODO: make this an image
+/*layout(binding = 0, std140) readonly buffer atlas_buffer {
+    uint atlas[];
+};*/
+layout(binding = 1, rgba8) uniform writeonly image2D dest;
+
 layout(push_constant) uniform constants {
     uvec2 size;
     uvec2 cells;
@@ -25,10 +30,11 @@ void main() {
         return;
     }
 
-    // uvec2 cell = coord / uvec2(2, 2); //terminal.cell_size;
     uvec2 cell = coord / terminal.cell_size;
-    // uvec2 cell = uvec2(round(vec2(coord) / vec2(terminal.cell_size)));
     uvec2 offset = coord % terminal.cell_size;
 
+    //uint pixel = atlas[97 * (terminal.cell_size.x * terminal.cell_size.y) + offset.y * terminal.cell_size.y + offset.x];
+    //uint pixel = atlas[0];
     imageStore(dest, ivec2(coord), colors[(cell.x + cell.y) % 4]);
+    //imageStore(dest, ivec2(coord), ivec4(pixel, pixel, pixel, 255));
 }

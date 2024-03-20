@@ -10,6 +10,7 @@ gpa: Allocator,
 wayland: Wayland,
 vulkan: Vulkan,
 glyph_cache: GlyphCache,
+cells: std.MultiArrayList(Cell),
 running: bool,
 
 // mirrored to GPU via push constant
@@ -54,6 +55,7 @@ pub fn init(gpa: Allocator) !App {
             },
             .offset = .{ .x = 0, .y = 0 },
         },
+        .cells = .{},
     };
 
     return app;
@@ -69,9 +71,10 @@ pub fn deinit(app: *App) void {
     app.vulkan.deinit();
     app.wayland.deinit();
     app.glyph_cache.deinit();
+    app.cells.deinit(app.gpa);
 }
 
-pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) void {
+pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) !void {
     const width = if (width_hint > 0) width_hint else 640;
     const height = if (height_hint > 0) height_hint else 360;
 
@@ -85,5 +88,22 @@ pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) void {
         .offset = .{ .x = (width % cell_width) / 2, .y = (height % cell_height) / 2 },
     };
 
+    // const lipsum = @embedFile("lipsum.txt");
+    const cols = app.terminal.cells.cols;
+    const rows = app.terminal.cells.rows;
+    try app.cells.resize(app.gpa, cols * rows);
+
+    var k: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            app.cells.set(k, .{
+                .glyph = 0,
+                .style = 0xffffffff,
+            });
+            k += 1;
+        }
+    }
     // std.debug.print("{} {} {} {} {} {}\n", .{ app.terminal.size.width, app.terminal.size.height, app.terminal.cell_size.width, app.terminal.cell_size.height, app.terminal.cells.cols, app.terminal.cells.rows });
 }

@@ -9,9 +9,10 @@ pub fn build(b: *std.Build) void {
     const wayland = b.createModule(.{ .source_file = scanner.result });
 
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
-    scanner.generate("wl_compositor", 4);
-    scanner.generate("wl_seat", 4);
-    scanner.generate("xdg_wm_base", 3);
+    scanner.generate("wl_compositor", 6);
+    scanner.generate("wl_output", 4);
+    scanner.generate("wl_seat", 8);
+    scanner.generate("xdg_wm_base", 6);
 
     const exe = b.addExecutable(.{
         .name = "bolt",
