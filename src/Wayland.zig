@@ -1,6 +1,6 @@
 const std = @import("std");
 const wayland = @import("wayland");
-const Vulkan = @import("Vulkan.zig");
+// const Vulkan = @import("Vulkan.zig");
 const App = @import("App.zig");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
@@ -159,8 +159,8 @@ fn xdgToplevelListener(
             app.configureTerminal(@intCast(configure.width), @intCast(configure.height)) catch return;
 
             if (app.running) {
-                app.vulkan.deinitBufferObjects();
-                app.vulkan.initBufferObjects() catch return;
+                // app.vulkan.deinitBufferObjects();
+                // app.vulkan.initBufferObjects() catch return;
             }
         },
         .close => {

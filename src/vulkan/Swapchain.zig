@@ -40,86 +40,24 @@ const SyncObjects = struct {
     in_flight: c.VkFence,
 };
 
-gpa: Allocator,
-app: *App,
+vulkan: *const VulkanInstance,
 
-instance: c.VkInstance,
-surface: c.VkSurfaceKHR,
-physical_device: c.VkPhysicalDevice,
-device: c.VkDevice,
-queue_families: QueueFamilies,
-graphics_queue: c.VkQueue,
-presentation_queue: c.VkQueue,
-compute_queue: c.VkQueue,
-command_pool: c.VkCommandPool,
-sync_objects: SyncObjects,
-descriptor_pool: c.VkDescriptorPool,
-global_sets: []const c.VkDescriptorSet,
-// descriptor_set_layout: c.VkDescriptorSetLayout,
-// descriptor_set: c.VkDescriptorSet,
+swapchain: c.VkSwapchainKHR,
+images: []const c.VkImage,
+format: c.VkFormat,
+extent: c.VkExtent2D,
+views: []const c.VkImageView,
 
-swapchain: Swapchain,
-pipeline_layout: c.VkPipelineLayout,
-pipeline: c.VkPipeline,
-global_set_layout: c.VkDescriptorSetLayout,
-command_buffer: c.VkCommandBuffer,
+ds_pool: c.VkDescriptorPool,
+ds_set_layout: c.VkDescriptorSetLayout,
+ds_set: c.VkDescriptorSet,
+image_available: c.VkSemaphore,
+render_finished: c.VkSemaphore,
+in_flight: c.VkFence,
 
 pub fn init(app: *App) !Vulkan {
     const gpa = app.gpa;
 
-    const application_info: c.VkApplicationInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pNext = null,
-        .pApplicationName = "bolt",
-        .applicationVersion = c.VK_MAKE_VERSION(0, 0, 1),
-        .pEngineName = "bolt",
-        .engineVersion = c.VK_MAKE_VERSION(0, 0, 1),
-        .apiVersion = c.VK_API_VERSION_1_0,
-    };
-
-    const extensions: []const [*:0]const u8 = &.{
-        c.VK_KHR_SURFACE_EXTENSION_NAME,
-        c.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
-    };
-
-    const debug_layers: []const [*:0]const u8 = &.{
-        "VK_LAYER_KHRONOS_validation",
-    };
-
-    const instance_info: c.VkInstanceCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .pApplicationInfo = &application_info,
-        .enabledLayerCount = if (builtin.mode == .Debug) @intCast(debug_layers.len) else 0,
-        .ppEnabledLayerNames = debug_layers.ptr,
-        .enabledExtensionCount = @intCast(extensions.len),
-        .ppEnabledExtensionNames = extensions.ptr,
-    };
-
-    var instance: c.VkInstance = undefined;
-    if (c.vkCreateInstance(&instance_info, null, &instance) != c.VK_SUCCESS) {
-        return error.VkCreateInstanceFailed;
-    }
-
-    const surface_info: c.VkWaylandSurfaceCreateInfoKHR = .{
-        .sType = c.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
-        .pNext = null,
-        .flags = 0,
-        .display = @ptrCast(app.wayland.display),
-        .surface = @ptrCast(app.wayland.surface),
-    };
-
-    var surface: c.VkSurfaceKHR = undefined;
-    if (c.vkCreateWaylandSurfaceKHR(instance, &surface_info, null, &surface) != c.VK_SUCCESS) {
-        return error.VkCreateSurfaceFailed;
-    }
-
-    const physical_device = try selectPhysicalDevice(gpa, instance, surface);
-    const queue_families = try findQueueFamilies(gpa, physical_device, surface);
-    const device = try createLogicalDevice(gpa, physical_device, queue_families);
-    const command_pool = try createCommandPool(device, queue_families.compute);
-    const sync_objects = try createSyncObjects(device);
     const descriptor_pool = try createDescriptorPool(device);
     const pipeline_info = try createRenderPipeline(gpa, device);
 

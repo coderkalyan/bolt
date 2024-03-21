@@ -1,6 +1,6 @@
 const std = @import("std");
 const Wayland = @import("Wayland.zig");
-const Vulkan = @import("Vulkan.zig");
+// const Vulkan = @import("Vulkan.zig");
 const pty = @import("pty.zig");
 const GlyphCache = @import("GlyphCache.zig");
 const App = @import("App.zig");
@@ -59,6 +59,6 @@ pub fn main() !void {
     app.running = true;
     while (app.running) {
         if (app.wayland.display.dispatch() != .SUCCESS) break;
-        try app.vulkan.drawFrame();
+        // try app.vulkan.drawFrame();
     }
 }

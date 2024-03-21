@@ -1,6 +1,7 @@
 const std = @import("std");
 const Wayland = @import("Wayland.zig");
-const Vulkan = @import("Vulkan.zig");
+// const Vulkan = @import("Vulkan.zig");
+const VulkanInstance = @import("vulkan/Instance.zig");
 const GlyphCache = @import("GlyphCache.zig");
 const Allocator = std.mem.Allocator;
 
@@ -8,7 +9,8 @@ const App = @This();
 
 gpa: Allocator,
 wayland: Wayland,
-vulkan: Vulkan,
+// vulkan: Vulkan,
+vk_instance: VulkanInstance,
 glyph_cache: GlyphCache,
 cells: std.MultiArrayList(Cell),
 running: bool,
@@ -40,8 +42,8 @@ pub fn init(gpa: Allocator) !App {
     const app: App = .{
         .gpa = gpa,
         .wayland = try Wayland.init(),
-        .glyph_cache = try GlyphCache.init(),
-        .vulkan = undefined,
+        .glyph_cache = undefined, //try GlyphCache.init(),
+        .vk_instance = undefined,
         .running = false,
         .terminal = .{
             .size = .{
@@ -63,12 +65,12 @@ pub fn init(gpa: Allocator) !App {
 
 pub fn configure(app: *App) !void {
     try app.wayland.configureToplevel();
-    app.vulkan = try Vulkan.init(app);
-    try app.vulkan.initBufferObjects();
+    app.vk_instance = try VulkanInstance.init(app);
+    // try app.vulkan.initBufferObjects();
 }
 
 pub fn deinit(app: *App) void {
-    app.vulkan.deinit();
+    app.vk_instance.deinit();
     app.wayland.deinit();
     app.glyph_cache.deinit();
     app.cells.deinit(app.gpa);
