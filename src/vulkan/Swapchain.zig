@@ -12,33 +12,7 @@ const c = @cImport({
     @cInclude("pixman.h");
 });
 
-const Vulkan = @This();
-
-const QueueFamilies = struct {
-    graphics: u32,
-    presentation: u32,
-    compute: u32,
-};
-
-const SwapChainSupport = struct {
-    capabilities: c.VkSurfaceCapabilitiesKHR,
-    formats: []const c.VkSurfaceFormatKHR,
-    modes: []const c.VkPresentModeKHR,
-};
-
-const Swapchain = struct {
-    swapchain: c.VkSwapchainKHR,
-    images: []const c.VkImage,
-    format: c.VkFormat,
-    extent: c.VkExtent2D,
-    image_views: []const c.VkImageView,
-};
-
-const SyncObjects = struct {
-    image_available: c.VkSemaphore,
-    render_finished: c.VkSemaphore,
-    in_flight: c.VkFence,
-};
+const Swapchain = @This();
 
 vulkan: *const VulkanInstance,
 
@@ -48,7 +22,6 @@ format: c.VkFormat,
 extent: c.VkExtent2D,
 views: []const c.VkImageView,
 
-ds_pool: c.VkDescriptorPool,
 ds_set_layout: c.VkDescriptorSetLayout,
 ds_set: c.VkDescriptorSet,
 image_available: c.VkSemaphore,
@@ -137,130 +110,149 @@ pub fn init(app: *App) !Vulkan {
     return vulkan;
 }
 
-pub fn deinit(self: *Vulkan) void {
-    _ = c.vkDeviceWaitIdle(self.device);
-    c.vkDestroySemaphore(self.device, self.sync_objects.image_available, null);
-    c.vkDestroySemaphore(self.device, self.sync_objects.render_finished, null);
-    c.vkDestroyFence(self.device, self.sync_objects.in_flight, null);
-    c.vkDestroyCommandPool(self.device, self.command_pool, null);
-    c.vkDestroyPipeline(self.device, self.pipeline, null);
-    c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
-    self.deinitBufferObjects();
-    c.vkDestroyDevice(self.device, null);
-    c.vkDestroySurfaceKHR(self.instance, self.surface, null);
-    c.vkDestroyInstance(self.instance, null);
-}
+pub fn init(gpa: Allocator, vulkan: *const VulkanInstance) !Instance {
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
 
-pub fn initBufferObjects(self: *Vulkan) !void {
-    self.swapchain = try self.createSwapchain();
+    // choose swapchain format and initialize swapchain
+    const format = format: {
+        for (support.formats) |format| {
+            if (format.format == c.VK_FORMAT_R8G8B8A8_UINT) {
+                break :format format;
+            }
+        }
+        // TODO: the fallback case may not support writing to
+        // swapchain in compute and presentation
+        break :format support.formats[0];
+    };
 
-    if (self.global_sets.len != 0) {
-        _ = c.vkFreeDescriptorSets(
-            self.device,
-            self.descriptor_pool,
-            @intCast(self.global_sets.len),
-            self.global_sets.ptr,
-        );
+    // guaranteed to exist and is energy efficient
+    const mode = c.VK_PRESENT_MODE_FIFO_KHR;
+
+    const extent = chooseSwapExtent(&support.capabilities, self.app);
+    const max_image_count = support.capabilities.maxImageCount;
+    // choose min count + 1, bounded by max count (if present)
+    var image_count = @min(
+        if (max_image_count == 0) std.math.maxInt(u32) else max_image_count,
+        support.capabilities.minImageCount + 1,
+    );
+
+    const distinct = vulkan.comp_index != vulkan.pres_index;
+    const indices: []const u32 = &.{ vulkan.comp_index, vulkan.pres_index };
+
+    const swapchain_info: c.VkSwapchainCreateInfoKHR = .{
+        .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = null,
+        .flags = 0,
+        .surface = vulkan.surface,
+        .minImageCount = image_count,
+        .imageFormat = format.format,
+        .imageColorSpace = format.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,
+        .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_STORAGE_BIT,
+        // TODO: why is this breaking
+        // .imageSharingMode = if (distinct) c.VK_SHARING_MODE_CONCURRENT else c.VK_SHARING_MODE_EXCLUSIVE,
+        .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = if (distinct) indices.len else 0,
+        .pQueueFamilyIndices = if (distinct) indices.ptr else null,
+        .preTransform = support.capabilities.currentTransform,
+        .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = mode,
+        .clipped = c.VK_TRUE,
+        .oldSwapchain = @ptrCast(c.VK_NULL_HANDLE),
+    };
+
+    var swapchain: c.VkSwapchainKHR = undefined;
+    if (c.vkCreateSwapchainKHR(vulkan.device, &swapchain_info, null, &swapchain) != c.VK_SUCCESS) {
+        return error.VkCreateSwapchainFailed;
     }
+
+    // obtain swapchain image handles
+    if (c.vkGetSwapchainImagesKHR(vulkan.device, swapchain, &image_count, null) != c.VK_SUCCESS) {
+        return error.VkGetSwapchainImagesFailed;
+    }
+
+    const images = try gpa.alloc(c.VkImage, image_count);
+    if (c.vkGetSwapchainImagesKHR(vulkan.device, swapchain, &image_count, images.ptr) != c.VK_SUCCESS) {
+        return error.VkGetSwapchainImagesFailed;
+    }
+
+    // bind image views for swapchain images
+    const views = try gpa.alloc(c.VkImageView, images.len);
+    for (images, 0..) |image, i| {
+        const view_info: c.VkImageViewCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .image = image,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .components = .{
+                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        if (c.vkCreateImageView(vulkan.device, &view_info, null, &views[i]) != c.VK_SUCCESS) {
+            return error.VkCreateImageViewFailed;
+        }
+    }
+
+    // create synchronization primitives
+    const semaphore_info: c.VkSemaphoreCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    const fence_info: c.VkFenceCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .pNext = null,
+        .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+
+    var image_available: c.VkSemaphore = undefined;
+    if (c.vkCreateSemaphore(device, &semaphore_info, null, &image_available) != c.VK_SUCCESS) {
+        return error.VkCreateSemaphoreFailed;
+    }
+
+    var render_finished: c.VkSemaphore = undefined;
+    if (c.vkCreateSemaphore(device, &semaphore_info, null, &render_finished) != c.VK_SUCCESS) {
+        return error.VkCreateSemaphoreFailed;
+    }
+
+    var in_flight: c.VkFence = undefined;
+    if (c.vkCreateFence(device, &fence_info, null, &in_flight) != c.VK_SUCCESS) {
+        return error.VkCreateFenceFailed;
+    }
+
+    return .{
+        .vulkan = vulkan,
+        .swapchain = swapchain,
+        .images = images,
+        .format = format,
+        .extent = extent,
+        .views = views,
+        .image_available = image_available,
+        .render_finished = render_finished,
+        .in_flight = in_flight,
+    };
+
     self.global_sets = try self.createGlobalSets();
     try self.bindGlobalSets();
 
     self.command_buffer = try self.createCommandBuffer();
-}
-
-fn createInstance() !c.VkInstance {
-
-    return instance;
-}
-
-fn createSurface(instance: c.VkInstance, display: *const Wayland) !c.VkSurfaceKHR {
-
-    return surface;
-}
-
-fn selectPhysicalDevice(
-    gpa: Allocator,
-    instance: c.VkInstance,
-    surface: c.VkSurfaceKHR,
-) !c.VkPhysicalDevice {
-    var device_count: u32 = 0;
-    var result = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
-    if (result != c.VK_SUCCESS or device_count == 0) {
-        return error.NoValidPhysicalDevice;
-    }
-
-    const devices = try gpa.alloc(c.VkPhysicalDevice, device_count);
-    defer gpa.free(devices);
-    result = c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr);
-    if (result != c.VK_SUCCESS) {
-        return error.NoValidPhysicalDevice;
-    }
-
-    var chosen: c.VkPhysicalDevice = null;
-    for (devices) |device| {
-        var properties: c.VkPhysicalDeviceProperties = undefined;
-        var features: c.VkPhysicalDeviceFeatures = undefined;
-        _ = c.vkGetPhysicalDeviceProperties(device, &properties);
-        _ = c.vkGetPhysicalDeviceFeatures(device, &features);
-
-        if (features.geometryShader != @intFromBool(true)) continue;
-        _ = findQueueFamilies(gpa, device, surface) catch |err| switch (err) {
-            error.QueueFamilyNotFound => continue,
-            else => return err,
-        };
-        // TODO: check if all required extensions are supported by device
-        const swapchain_support = try querySwapchainSupport(gpa, device, surface);
-        defer gpa.free(swapchain_support.formats);
-        defer gpa.free(swapchain_support.modes);
-
-        if (swapchain_support.formats.len == 0 or swapchain_support.modes.len == 0) continue;
-        if (chosen == null or properties.deviceType == c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-            // always choose a compatible device, preferring integrated graphics
-            chosen = device;
-        }
-    }
-    return chosen;
-}
-
-fn findQueueFamilies(
-    gpa: Allocator,
-    device: c.VkPhysicalDevice,
-    surface: c.VkSurfaceKHR,
-) !QueueFamilies {
-    var graphics: ?u32 = null;
-    var presentation: ?u32 = null;
-    var compute: ?u32 = null;
-
-    var family_count: u32 = 0;
-    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, null);
-    const families = try gpa.alloc(c.VkQueueFamilyProperties, family_count);
-    defer gpa.free(families);
-    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, families.ptr);
-
-    for (families, 0..) |family, i| {
-        if ((family.queueFlags & (c.VK_QUEUE_GRAPHICS_BIT | c.VK_QUEUE_COMPUTE_BIT)) != 0) {
-            graphics = @intCast(i);
-            compute = @intCast(i);
-        }
-
-        // if ((family.queueFlags & c.VK_QUEUE_COMPUTE_BIT) != 0) {
-        //     compute = @intCast(i);
-        // }
-
-        var presentation_support: c.VkBool32 = @intFromBool(false);
-        _ = c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface, &presentation_support);
-        if (presentation_support == @intFromBool(true)) presentation = @intCast(i);
-    }
-
-    if (graphics == null) return error.QueueFamilyNotFound;
-    if (presentation == null) return error.QueueFamilyNotFound;
-    if (compute == null) return error.QueueFamilyNotFound;
-
-    return .{
-        .graphics = graphics.?,
-        .presentation = presentation.?,
-        .compute = compute.?,
-    };
 }
 
 fn querySwapchainSupport(
@@ -290,66 +282,6 @@ fn querySwapchainSupport(
         .formats = formats,
         .modes = modes,
     };
-}
-
-fn createLogicalDevice(
-    gpa: Allocator,
-    physical_device: c.VkPhysicalDevice,
-    queue_families: QueueFamilies,
-) !c.VkDevice {
-    const debug_layers: []const [*:0]const u8 = &.{
-        "VK_LAYER_KHRONOS_validation",
-    };
-
-    const families: []const u32 = &.{
-        queue_families.graphics,
-        queue_families.presentation,
-        queue_families.compute,
-    };
-    const queue_create_infos = try gpa.alloc(c.VkDeviceQueueCreateInfo, families.len);
-    defer gpa.free(queue_create_infos);
-
-    const priority: f32 = 1.0;
-    var unique_queues: u32 = 0;
-    for (families, 0..) |family, i| {
-        if (std.mem.indexOfScalar(u32, families[0..i], family) != null) continue;
-        queue_create_infos[unique_queues] = .{
-            .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .queueFamilyIndex = family,
-            .queueCount = 1,
-            .pQueuePriorities = &priority,
-        };
-        unique_queues += 1;
-    }
-
-    var device_features: c.VkPhysicalDeviceFeatures = undefined;
-    @memset(std.mem.asBytes(&device_features), 0);
-
-    const extensions: []const [*:0]const u8 = &.{
-        c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    };
-    // TODO: compatibility checks for swapchain
-    const device_create_info: c.VkDeviceCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .queueCreateInfoCount = unique_queues,
-        .pQueueCreateInfos = queue_create_infos.ptr,
-        .pEnabledFeatures = &device_features,
-        .enabledExtensionCount = extensions.len,
-        .ppEnabledExtensionNames = extensions.ptr,
-        .enabledLayerCount = if (builtin.mode == .Debug) @intCast(debug_layers.len) else 0,
-        .ppEnabledLayerNames = debug_layers.ptr,
-    };
-
-    var device: c.VkDevice = undefined;
-    if (c.vkCreateDevice(physical_device, &device_create_info, null, &device) != c.VK_SUCCESS) {
-        return error.VkCreateDeviceFailed;
-    }
-
-    return device;
 }
 
 fn createSwapchain(self: *Vulkan) !Swapchain {
@@ -426,16 +358,16 @@ fn createSwapchain(self: *Vulkan) !Swapchain {
     };
 }
 
-pub fn deinitBufferObjects(self: *Vulkan) void {
-    _ = c.vkDeviceWaitIdle(self.device);
+pub fn deinit(self: *Swapchain) void {
+    _ = c.vkDeviceWaitIdle(self.vulkan.device);
 
-    for (self.swapchain.image_views) |image_view| {
+    for (self.views) |image_view| {
         c.vkDestroyImageView(self.device, image_view, null);
     }
-    self.gpa.free(self.swapchain.image_views);
-    self.gpa.free(self.swapchain.images);
+    self.gpa.free(self.views);
+    self.gpa.free(self.images);
 
-    c.vkDestroySwapchainKHR(self.device, self.swapchain.swapchain, null);
+    c.vkDestroySwapchainKHR(self.vulkan.device, self.swapchain, null);
 }
 
 fn chooseSwapExtent(
@@ -868,62 +800,6 @@ fn recordCommandBuffer(
     }
 }
 
-fn createSyncObjects(device: c.VkDevice) !SyncObjects {
-    var sync: SyncObjects = undefined;
-    const semaphore_info: c.VkSemaphoreCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-    };
-    const fence_info: c.VkFenceCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .pNext = null,
-        .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
-    };
-
-    if (c.vkCreateSemaphore(device, &semaphore_info, null, &sync.image_available) != c.VK_SUCCESS) {
-        return error.VkCreateSemaphoreFailed;
-    }
-    if (c.vkCreateSemaphore(device, &semaphore_info, null, &sync.render_finished) != c.VK_SUCCESS) {
-        return error.VkCreateSemaphoreFailed;
-    }
-    if (c.vkCreateFence(device, &fence_info, null, &sync.in_flight) != c.VK_SUCCESS) {
-        return error.VkCreateSemaphoreFailed;
-    }
-
-    return sync;
-}
-
-fn createDescriptorPool(device: c.VkDevice) !c.VkDescriptorPool {
-    const pool_size1: c.VkDescriptorPoolSize = .{
-        .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 1,
-    };
-    const pool_size2: c.VkDescriptorPoolSize = .{
-        .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-    };
-    const pool_sizes: []const c.VkDescriptorPoolSize = &.{
-        pool_size1, pool_size2,
-    };
-
-    const pool_info: c.VkDescriptorPoolCreateInfo = .{
-        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .poolSizeCount = pool_sizes.len,
-        .pPoolSizes = pool_sizes.ptr,
-        .maxSets = 1,
-    };
-
-    var pool: c.VkDescriptorPool = undefined;
-    if (c.vkCreateDescriptorPool(device, &pool_info, null, &pool) != c.VK_SUCCESS) {
-        return error.VkCreateDescriptorPoolFailed;
-    }
-
-    return pool;
-}
-
 pub fn drawFrame(self: *Vulkan) !void {
     _ = c.vkWaitForFences(self.device, 1, &self.sync_objects.in_flight, c.VK_TRUE, std.math.maxInt(u64));
     _ = c.vkResetFences(self.device, 1, &self.sync_objects.in_flight);
@@ -985,37 +861,6 @@ pub fn drawFrame(self: *Vulkan) !void {
     };
     _ = c.vkQueuePresentKHR(self.presentation_queue, &present_info);
 }
-
-pub const Cell = struct {
-    // row, col
-    location: [2]u32,
-    character: u32,
-
-    pub fn bindingDescription() c.VkVertexInputBindingDescription {
-        return .{
-            .binding = 0,
-            .stride = @sizeOf(Cell),
-            .inputRate = c.VK_VERTEX_INPUT_RATE_INSTANCE,
-        };
-    }
-
-    pub fn attributeDescriptions() [2]c.VkVertexInputAttributeDescription {
-        return [2]c.VkVertexInputAttributeDescription{
-            .{
-                .binding = 0,
-                .location = 0,
-                .format = c.VK_FORMAT_R32G32_UINT,
-                .offset = @offsetOf(Cell, "location"),
-            },
-            .{
-                .binding = 0,
-                .location = 1,
-                .format = c.VK_FORMAT_R32_UINT,
-                .offset = @offsetOf(Cell, "character"),
-            },
-        };
-    }
-};
 
 pub fn createBuffer(
     self: *Vulkan,
@@ -1126,210 +971,6 @@ fn copyBuffer(self: *Vulkan, src: c.VkBuffer, dest: c.VkBuffer, size: c.VkDevice
     };
     _ = c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, @ptrCast(c.VK_NULL_HANDLE));
     _ = c.vkQueueWaitIdle(self.graphics_queue);
-}
-
-fn createGlyphAtlas(self: *Vulkan) !c.VkBuffer {
-    const gpa = self.gpa;
-    const app = @fieldParentPtr(App, "vulkan", self);
-    const gc = &app.glyph_cache;
-    // for (gc.ascii) |glyph| {
-    //     std.debug.print("cp: {} cols: {} advance x: {} y: {}\n", .{ glyph.cp, glyph.cols, glyph.advance.x, glyph.advance.y });
-    //     std.debug.print("format: {} {} {} {} {}\n", .{ c.pixman_image_get_format(@ptrCast(glyph.pix)), c.PIXMAN_a1, c.PIXMAN_a8, c.PIXMAN_x8r8g8b8, c.PIXMAN_a8r8g8b8 });
-    // }
-    // const glyph = gc.ascii['a'];
-    // const advance = glyph.advance;
-    // _ = advance;
-    // const data: [*]u8 = @ptrCast(c.pixman_image_get_data(@ptrCast(glyph.pix)));
-    // // _ = data;
-    // const stdout = std.io.getStdOut().writer();
-    // std.debug.print("{} {} {} {}\n", .{ glyph.width, glyph.height, glyph.x, glyph.y });
-    // // var width: u32 = @intCast(c.pixman_image_get_width(@ptrCast(gc.ascii['T'].pix)));
-    // // var height: u32 = @intCast(c.pixman_image_get_height(@ptrCast(gc.ascii['T'].pix)));
-    // var width: u32 = @intCast(glyph.width);
-    // var height: u32 = @intCast(glyph.height);
-    // const stride: u32 = @intCast(c.pixman_image_get_stride(@ptrCast(glyph.pix)));
-    // var k: usize = 0;
-    // var i: usize = 0;
-    // while (i < height) : (i += 1) {
-    //     var j: usize = 0;
-    //     while (j < width) : (j += 1) {
-    //         k = (i * stride) + j;
-    //         try stdout.print("\x1b[38;2;{};{};{}m██", .{ data[k], data[k], data[k] });
-    //     }
-    //     std.debug.print("\n", .{});
-    // }
-
-    // {
-    //     var i: usize = 0;
-    //     while (i < height) : (i += 1) {
-    //         var j: usize = 0;
-    //         while (j < width) : (j += 1) {
-    //             const k = (i * width) + j + (cp_stride * 'M');
-    //             std.debug.print("\x1b[38;2;{};{};{}m██", .{ atlas[k], atlas[k], atlas[k] });
-    //         }
-    //         std.debug.print("\n", .{});
-    //     }
-    // }
-    // {
-    //     var i: usize = 0;
-    //     while (i < height) : (i += 1) {
-    //         var j: usize = 0;
-    //         while (j < width) : (j += 1) {
-    //             const k = (i * width) + j + (cp_stride * 'a');
-    //             std.debug.print("\x1b[38;2;{};{};{}m██", .{ atlas[k], atlas[k], atlas[k] });
-    //         }
-    //         std.debug.print("\n", .{});
-    //     }
-    // }
-    // {
-    //     var i: usize = 0;
-    //     while (i < height) : (i += 1) {
-    //         var j: usize = 0;
-    //         while (j < width) : (j += 1) {
-    //             const k = (i * width) + j + (cp_stride * 'x');
-    //             std.debug.print("\x1b[38;2;{};{};{}m██", .{ atlas[k], atlas[k], atlas[k] });
-    //         }
-    //         std.debug.print("\n", .{});
-    //     }
-    // }
-
-    const width: u32 = @intCast(gc.ascii['a'].width);
-    const height: u32 = @intCast(gc.ascii['a'].height);
-    const stride: u32 = @intCast(c.pixman_image_get_stride(@ptrCast(gc.ascii['a'].pix)));
-
-    var atlas = try gpa.alloc(u8, width * 128 * height);
-    const cp_stride = width * height;
-    var cp: usize = 0;
-    while (cp < 128) : (cp += 1) {
-        const glyph = gc.ascii[cp];
-        const data: [*]u8 = @ptrCast(c.pixman_image_get_data(@ptrCast(glyph.pix)));
-        const x = cp_stride * cp;
-        var y: usize = 0;
-        while (y < height) : (y += 1) {
-            @memcpy(atlas[x + y * width .. x + y * width + width], data[y * stride .. y * stride + width]);
-        }
-    }
-
-    var staging_buffer: c.VkBuffer = undefined;
-    var staging_memory: c.VkDeviceMemory = undefined;
-    try self.createBuffer(
-        atlas.len,
-        c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, //TRANSFER_SRC_BIT,
-        c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        &staging_buffer,
-        &staging_memory,
-    );
-
-    var data: []u8 = undefined;
-    data.len = atlas.len;
-    _ = c.vkMapMemory(self.device, staging_memory, 0, atlas.len, 0, @ptrCast(&data.ptr));
-    // @memcpy(data, atlas);
-    @memset(data, 255);
-    c.vkUnmapMemory(self.device, staging_memory);
-
-    return staging_buffer;
-
-    // const image_info: c.VkImageCreateInfo = .{
-    //     .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-    //     .pNext = null,
-    //     .imageType = c.VK_IMAGE_TYPE_2D,
-    //     .extent = .{ .width = width * 128, .height = height, .depth = 1 },
-    //     .mipLevels = 1,
-    //     .arrayLayers = 1,
-    //     .format = c.VK_FORMAT_R8_UINT,
-    //     .tiling = c.VK_IMAGE_TILING_OPTIMAL,
-    //     .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-    //     .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
-    //     .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-    //     .samples = c.VK_SAMPLE_COUNT_1_BIT,
-    //     .flags = 0,
-    //     .queueFamilyIndexCount = 0,
-    //     .pQueueFamilyIndices = null,
-    // };
-    //
-    // var atlas_image: c.VkImage = undefined;
-    // if (c.vkCreateImage(self.device, &image_info, null, &atlas_image) != c.VK_SUCCESS) {
-    //     return error.VkCreateImageFailed;
-    // }
-    //
-    // var mem_reqs: c.VkMemoryRequirements = undefined;
-    // c.vkGetImageMemoryRequirements(self.device, atlas_image, &mem_reqs);
-    //
-    // const image_alloc_info: c.VkMemoryAllocateInfo = .{
-    //     .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-    //     .pNext = null,
-    //     .allocationSize = mem_reqs.size,
-    //     .memoryTypeIndex = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
-    // };
-    //
-    // var image_memory: c.VkDeviceMemory = undefined;
-    // if (c.vkAllocateMemory(self.device, &image_alloc_info, null, &image_memory) != c.VK_SUCCESS) {
-    //     return error.VkAllocateMemoryFailed;
-    // }
-    //
-    // c.vkBindImageMemory(self.device, atlas_image, image_memory, 0);
-
-    // const cb_alloc_info: c.vkCommandBuffer = .{
-    //     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-    //     .pNext = null,
-    //     .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-    //     .commandPool = self.command_pool,
-    //     .commandBufferCount = 1,
-    // };
-    //
-    // var command_buffer: c.VkCommandbuffer = undefined;
-    // _ = c.vkAllocateCommandBuffers(self.device, &cb_alloc_info, &command_buffer);
-    // defer c.vkFreeCommandBuffers(self.device, self.command_pool, 1, &command_buffer);
-    //
-    // c.vkBeginCommandBuffer(command_buffer, &.{
-    //     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    //     .pNext = null,
-    //     .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    // });
-    //
-    // c.vkCmdPipelineBarrier(
-    //     command_buffer,
-    //     c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    //     c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    //     c.VK_DEPENDENCY_BY_REGION_BIT, // TODO: correct?
-    //     0,
-    //     null,
-    //     0,
-    //     null,
-    //     1,
-    //     &@as(c.VkImageMemoryBarrier, .{
-    //         .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-    //         .pNext = null,
-    //         .srcAccessMask = 0,
-    //         .dstAccessMask = 0,
-    //         .oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-    //         .newLayout = c.VK_IMAGE_LAYOUT_GENERAL,
-    //         .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
-    //         .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
-    //         .image = atlas_image,
-    //         .subresourceRange = .{
-    //             .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-    //             .baseMipLevel = 0,
-    //             .levelCount = 1,
-    //             .baseArrayLayer = 0,
-    //             .layerCount = 1,
-    //         },
-    //     }),
-    // );
-    // _ = c.vkQueueSubmit(self.graphics_queue, 1, &.{
-    //     .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-    //     .pNext = null,
-    //     .commandBufferCount = 1,
-    //     .pCommandBuffers = &command_buffer,
-    //     .waitSemaphoreCount = 0,
-    //     .pWaitSemaphores = null,
-    //     .signalSemaphoreCount = 0,
-    //     .pSignalSemaphores = null,
-    //     .pWaitDstStageMask = null,
-    // }, @ptrCast(c.VK_NULL_HANDLE));
-    // _ = c.vkQueueWaitIdle(self.graphics_queue);
-
-    // const image_size: c.VkDeviceSize = atlas.len;
 }
 
 fn findMemoryType(physical_device: c.VkPhysicalDevice, filter: u32, properties: c.VkMemoryPropertyFlags) u32 {

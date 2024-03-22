@@ -50,13 +50,12 @@ comp_queue: c.VkQueue,
 pres_index: u32,
 pres_queue: c.VkQueue,
 cmd_pool: c.VkCommandPool,
+ds_pool: c.VkDescriptorPool,
 
 pub fn init(app: *App) !Vulkan {
     var arena_allocator = std.heap.ArenaAllocator.init(app.gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
-
-    const start = std.time.microTimestamp();
 
     // initialize vulkan instance
     const application_info: c.VkApplicationInfo = .{
@@ -94,8 +93,6 @@ pub fn init(app: *App) !Vulkan {
         return error.VkCreateInstanceFailed;
     }
 
-    const instance_done = std.time.microTimestamp();
-
     // bind wayland surface to vulkan surface
     const surface_info: c.VkWaylandSurfaceCreateInfoKHR = .{
         .sType = c.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
@@ -109,8 +106,6 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreateWaylandSurfaceKHR(instance, &surface_info, null, &surface) != c.VK_SUCCESS) {
         return error.VkCreateSurfaceFailed;
     }
-
-    const surface_done = std.time.microTimestamp();
 
     // select a physical device
     var phydev_count: u32 = 0;
@@ -145,8 +140,6 @@ pub fn init(app: *App) !Vulkan {
             pres_index = families.pres;
         }
     }
-
-    const phydev_done = std.time.microTimestamp();
 
     // create logical device
     const families: []const u32 = &.{ comp_index, pres_index };
@@ -192,8 +185,6 @@ pub fn init(app: *App) !Vulkan {
         return error.VkCreateDeviceFailed;
     }
 
-    const device_done = std.time.microTimestamp();
-
     // create command pool
     const cmd_pool_info: c.VkCommandPoolCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -207,21 +198,41 @@ pub fn init(app: *App) !Vulkan {
         return error.VkCreateCommandPoolFailed;
     }
 
-    const cmd_pool_done = std.time.microTimestamp();
+    // create descriptor pool
+    const ds_image_size: c.VkDescriptorPoolSize = .{
+        .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 16,
+    };
 
+    const ds_buffer_size: c.VkDescriptorPoolSize = .{
+        .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 16,
+    };
+
+    const ds_pool_sizes: []const c.VkDescriptorPoolSize = &.{
+        ds_image_size,
+        ds_buffer_size,
+    };
+
+    const ds_pool_info: c.VkDescriptorPoolCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .poolSizeCount = ds_pool_sizes.len,
+        .pPoolSizes = ds_pool_sizes.ptr,
+        .maxSets = 4,
+    };
+
+    var ds_pool: c.VkDescriptorPool = undefined;
+    if (c.vkCreateDescriptorPool(device, &ds_pool_info, null, &ds_pool) != c.VK_SUCCESS) {
+        return error.VkCreateDescriptorPoolFailed;
+    }
+
+    // initialize queues
     var comp_queue: c.VkQueue = undefined;
     var pres_queue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, comp_index, 0, &comp_queue);
     c.vkGetDeviceQueue(device, pres_index, 0, &pres_queue);
-
-    const queues_done = std.time.microTimestamp();
-
-    std.debug.print("instance time: {}\n", .{instance_done - start});
-    std.debug.print("surface time: {}\n", .{surface_done - instance_done});
-    std.debug.print("phydev time: {}\n", .{phydev_done - surface_done});
-    std.debug.print("device time: {}\n", .{device_done - phydev_done});
-    std.debug.print("command pool time: {}\n", .{cmd_pool_done - device_done});
-    std.debug.print("queues time: {}\n", .{queues_done - cmd_pool_done});
 
     return .{
         .app = app,
@@ -233,6 +244,7 @@ pub fn init(app: *App) !Vulkan {
         .pres_index = pres_index,
         .pres_queue = pres_queue,
         .cmd_pool = cmd_pool,
+        .ds_pool = ds_pool,
     };
 }
 
