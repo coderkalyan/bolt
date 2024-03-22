@@ -44,13 +44,18 @@ app: *App,
 
 instance: c.VkInstance,
 surface: c.VkSurfaceKHR,
+phydev: c.VkPhysicalDevice,
 device: c.VkDevice,
 comp_index: u32,
 comp_queue: c.VkQueue,
 pres_index: u32,
 pres_queue: c.VkQueue,
 cmd_pool: c.VkCommandPool,
+cmd_buffer: c.VkCommandBuffer,
 ds_pool: c.VkDescriptorPool,
+ds_layout_swapchain: c.VkDescriptorSetLayout,
+pipeline: c.VkPipeline,
+pipeline_layout: c.VkPipelineLayout,
 
 pub fn init(app: *App) !Vulkan {
     var arena_allocator = std.heap.ArenaAllocator.init(app.gpa);
@@ -75,6 +80,7 @@ pub fn init(app: *App) !Vulkan {
 
     const debug_layers: []const [*:0]const u8 = &.{
         "VK_LAYER_KHRONOS_validation",
+        // "VK_LAYER_LUNARG_standard_validation",
     };
 
     const instance_info: c.VkInstanceCreateInfo = .{
@@ -217,7 +223,7 @@ pub fn init(app: *App) !Vulkan {
     const ds_pool_info: c.VkDescriptorPoolCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = null,
-        .flags = 0,
+        .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
         .poolSizeCount = ds_pool_sizes.len,
         .pPoolSizes = ds_pool_sizes.ptr,
         .maxSets = 4,
@@ -228,28 +234,141 @@ pub fn init(app: *App) !Vulkan {
         return error.VkCreateDescriptorPoolFailed;
     }
 
+    // initialize descriptor set layouts
+    // the swapchain is only bound per window resize/monitor change (infrequently)
+    // writeonly storage image for writing to swapchain image
+    const swapchain_image_binding: c.VkDescriptorSetLayoutBinding = .{
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImmutableSamplers = null,
+        .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    var ds_layout_info: c.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .bindingCount = 1,
+        .pBindings = &swapchain_image_binding,
+    };
+
+    var ds_layout_swapchain: c.VkDescriptorSetLayout = undefined;
+    if (c.vkCreateDescriptorSetLayout(device, &ds_layout_info, null, &ds_layout_swapchain) != c.VK_SUCCESS) {
+        return error.VkCreateDescriptorSetLayoutFailed;
+    }
+
     // initialize queues
     var comp_queue: c.VkQueue = undefined;
     var pres_queue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, comp_index, 0, &comp_queue);
     c.vkGetDeviceQueue(device, pres_index, 0, &pres_queue);
 
+    // create pipeline
+    const shader_code = @embedFile("../comp.spv");
+    const shader_buffer = try arena.alignedAlloc(u8, @alignOf(u32), shader_code.len);
+    @memcpy(shader_buffer, shader_code);
+
+    const shader_info: c.VkShaderModuleCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .codeSize = shader_buffer.len,
+        .pCode = @ptrCast(@alignCast(shader_buffer.ptr)),
+    };
+
+    var shader_module: c.VkShaderModule = undefined;
+    if (c.vkCreateShaderModule(device, &shader_info, null, &shader_module) != c.VK_SUCCESS) {
+        return error.VkCreateShaderModuleFailed;
+    }
+    defer c.vkDestroyShaderModule(device, shader_module, null);
+
+    const shader_stage_info: c.VkPipelineShaderStageCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = c.VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shader_module,
+        .pName = "main",
+        .pSpecializationInfo = null,
+    };
+
+    comptime std.debug.assert(@sizeOf(App.Terminal) <= 128);
+    const push_info: c.VkPushConstantRange = .{
+        .offset = 0,
+        .size = @sizeOf(App.Terminal),
+        .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    const layout_info: c.VkPipelineLayoutCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .setLayoutCount = 1,
+        .pSetLayouts = &ds_layout_swapchain,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_info,
+    };
+
+    var layout: c.VkPipelineLayout = undefined;
+    if (c.vkCreatePipelineLayout(device, &layout_info, null, &layout) != c.VK_SUCCESS) {
+        return error.VkCreatePipelineLayoutFailed;
+    }
+
+    const pipeline_info: c.VkComputePipelineCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .layout = layout,
+        .stage = shader_stage_info,
+        .basePipelineHandle = @ptrCast(c.VK_NULL_HANDLE),
+        .basePipelineIndex = -1,
+    };
+
+    var pipeline: c.VkPipeline = undefined;
+    if (c.vkCreateComputePipelines(device, @ptrCast(c.VK_NULL_HANDLE), 1, &pipeline_info, null, &pipeline) != c.VK_SUCCESS) {
+        return error.VkCreateComputePipelineFailed;
+    }
+
+    // create primary command buffer for rendering, this can be reused per frame
+    // TODO: eventually, should try to cache the command buffer recording
+    const cmd_buffer_info: c.VkCommandBufferAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = null,
+        .commandPool = cmd_pool,
+        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+
+    var cmd_buffer: c.VkCommandBuffer = undefined;
+    if (c.vkAllocateCommandBuffers(device, &cmd_buffer_info, &cmd_buffer) != c.VK_SUCCESS) {
+        return error.VkAllocateCommandBuffersFailed;
+    }
+
     return .{
         .app = app,
         .instance = instance,
         .surface = surface,
+        .phydev = phydev,
         .device = device,
         .comp_index = comp_index,
         .comp_queue = comp_queue,
         .pres_index = pres_index,
         .pres_queue = pres_queue,
         .cmd_pool = cmd_pool,
+        .cmd_buffer = cmd_buffer,
         .ds_pool = ds_pool,
+        .ds_layout_swapchain = ds_layout_swapchain,
+        .pipeline = pipeline,
+        .pipeline_layout = layout,
     };
 }
 
 pub fn deinit(self: *Vulkan) void {
-    _ = c.vkDeviceWaitIdle(self.device);
+    c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
+    c.vkDestroyPipeline(self.device, self.pipeline, null);
+    c.vkDestroyDescriptorSetLayout(self.device, self.ds_layout_swapchain, null);
+    c.vkDestroyDescriptorPool(self.device, self.ds_pool, null);
     c.vkDestroyCommandPool(self.device, self.cmd_pool, null);
     c.vkDestroyDevice(self.device, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);

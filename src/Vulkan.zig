@@ -230,16 +230,6 @@ pub fn initBufferObjects(self: *Vulkan) !void {
     self.command_buffer = try self.createCommandBuffer();
 }
 
-fn createInstance() !c.VkInstance {
-
-    return instance;
-}
-
-fn createSurface(instance: c.VkInstance, display: *const Wayland) !c.VkSurfaceKHR {
-
-    return surface;
-}
-
 fn selectPhysicalDevice(
     gpa: Allocator,
     instance: c.VkInstance,

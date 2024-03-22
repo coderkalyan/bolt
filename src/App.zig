@@ -2,6 +2,7 @@ const std = @import("std");
 const Wayland = @import("Wayland.zig");
 // const Vulkan = @import("Vulkan.zig");
 const VulkanInstance = @import("vulkan/Instance.zig");
+const Swapchain = @import("vulkan/Swapchain.zig");
 const GlyphCache = @import("GlyphCache.zig");
 const Allocator = std.mem.Allocator;
 
@@ -9,10 +10,12 @@ const App = @This();
 
 gpa: Allocator,
 wayland: Wayland,
-// vulkan: Vulkan,
 vk_instance: VulkanInstance,
+vk_swapchain: Swapchain,
 glyph_cache: GlyphCache,
 cells: std.MultiArrayList(Cell),
+
+configured: bool,
 running: bool,
 
 // mirrored to GPU via push constant
@@ -44,6 +47,8 @@ pub fn init(gpa: Allocator) !App {
         .wayland = try Wayland.init(),
         .glyph_cache = undefined, //try GlyphCache.init(),
         .vk_instance = undefined,
+        .vk_swapchain = undefined,
+        .configured = false,
         .running = false,
         .terminal = .{
             .size = .{
@@ -66,14 +71,18 @@ pub fn init(gpa: Allocator) !App {
 pub fn configure(app: *App) !void {
     try app.wayland.configureToplevel();
     app.vk_instance = try VulkanInstance.init(app);
-    // try app.vulkan.initBufferObjects();
+    app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
+    app.configured = true;
 }
 
 pub fn deinit(app: *App) void {
-    app.vk_instance.deinit();
-    app.wayland.deinit();
-    app.glyph_cache.deinit();
     app.cells.deinit(app.gpa);
+    app.wayland.deinit();
+
+    if (!app.configured) return;
+    app.vk_swapchain.deinit();
+    app.vk_instance.deinit();
+    // app.glyph_cache.deinit();
 }
 
 pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) !void {
@@ -106,6 +115,14 @@ pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) !void {
             });
             k += 1;
         }
+    }
+
+    // recreate swapchain if running
+    if (app.running) {
+        app.vk_swapchain.deinit();
+        std.debug.print("device deinit: {?}\n", .{app.vk_instance.device});
+        app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
+        std.debug.print("device reinit: {?}\n", .{app.vk_instance.device});
     }
     // std.debug.print("{} {} {} {} {} {}\n", .{ app.terminal.size.width, app.terminal.size.height, app.terminal.cell_size.width, app.terminal.cell_size.height, app.terminal.cells.cols, app.terminal.cells.rows });
 }
