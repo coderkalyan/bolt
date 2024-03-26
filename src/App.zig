@@ -78,11 +78,16 @@ pub fn configure(app: *App) !void {
 pub fn deinit(app: *App) void {
     app.cells.deinit(app.gpa);
     app.wayland.deinit();
+}
 
-    if (!app.configured) return;
+pub fn deconfigure(app: *App) void {
     app.vk_swapchain.deinit();
     app.vk_instance.deinit();
-    // app.glyph_cache.deinit();
+}
+
+pub fn reinitSwapchain(app: *App) !void {
+    app.vk_swapchain.deinit();
+    app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
 }
 
 pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) !void {
@@ -118,11 +123,11 @@ pub fn configureTerminal(app: *App, width_hint: u32, height_hint: u32) !void {
     }
 
     // recreate swapchain if running
-    if (app.running) {
-        app.vk_swapchain.deinit();
-        std.debug.print("device deinit: {?}\n", .{app.vk_instance.device});
-        app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
-        std.debug.print("device reinit: {?}\n", .{app.vk_instance.device});
-    }
+    // if (app.running) {
+    //     app.vk_swapchain.deinit();
+    //     std.debug.print("device deinit: {?}\n", .{app.vk_instance.device});
+    //     app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
+    //     std.debug.print("device reinit: {?}\n", .{app.vk_instance.device});
+    // }
     // std.debug.print("{} {} {} {} {} {}\n", .{ app.terminal.size.width, app.terminal.size.height, app.terminal.cell_size.width, app.terminal.cell_size.height, app.terminal.cells.cols, app.terminal.cells.rows });
 }

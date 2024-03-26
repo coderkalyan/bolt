@@ -159,8 +159,7 @@ fn xdgToplevelListener(
             app.configureTerminal(@intCast(configure.width), @intCast(configure.height)) catch return;
 
             if (app.running) {
-                // app.vulkan.deinitBufferObjects();
-                // app.vulkan.initBufferObjects() catch return;
+                app.reinitSwapchain() catch return;
             }
         },
         .close => {

@@ -4,12 +4,7 @@ const Instance = @import("Instance.zig");
 const App = @import("../App.zig");
 const Allocator = std.mem.Allocator;
 
-const c = @cImport({
-    @cInclude("vulkan/vulkan.h");
-    @cInclude("vulkan/vulkan_wayland.h");
-    @cInclude("vulkan/vk_enum_string_helper.h");
-    @cInclude("pixman.h");
-});
+const c = Instance.c;
 
 const Swapchain = @This();
 
@@ -27,6 +22,8 @@ ds_swapchain: []const c.VkDescriptorSet,
 image_available: c.VkSemaphore,
 render_finished: c.VkSemaphore,
 in_flight: c.VkFence,
+
+ds_cells: c.VkDescriptorSet,
 
 pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
@@ -68,14 +65,16 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
                 break :format format;
             }
         }
+
         // TODO: the fallback case may not support writing to
         // swapchain in compute and presentation
         break :format formats[0];
     };
+    std.debug.print("format: {}\n", .{format.format});
 
     // guaranteed to exist and is energy efficient
-    // const mode = c.VK_PRESENT_MODE_FIFO_KHR;
-    const mode = c.VK_PRESENT_MODE_MAILBOX_KHR;
+    const mode = c.VK_PRESENT_MODE_FIFO_KHR;
+    // const mode = c.VK_PRESENT_MODE_MAILBOX_KHR;
 
     const extent: c.VkExtent2D = if (caps.currentExtent.width != std.math.maxInt(u32)) extent: {
         break :extent caps.currentExtent;
@@ -124,6 +123,7 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
     if (c.vkCreateSwapchainKHR(vulkan.device, &swapchain_info, null, &swapchain) != c.VK_SUCCESS) {
         return error.VkCreateSwapchainFailed;
     }
+    errdefer c.vkDestroySwapchainKHR(vulkan.device, swapchain, null);
 
     // obtain swapchain image handles
     if (c.vkGetSwapchainImagesKHR(vulkan.device, swapchain, &image_count, null) != c.VK_SUCCESS) {
@@ -131,12 +131,14 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
     }
 
     const images = try gpa.alloc(c.VkImage, image_count);
+    errdefer gpa.free(images);
     if (c.vkGetSwapchainImagesKHR(vulkan.device, swapchain, &image_count, images.ptr) != c.VK_SUCCESS) {
         return error.VkGetSwapchainImagesFailed;
     }
 
     // bind image views for swapchain images
     const views = try gpa.alloc(c.VkImageView, images.len);
+    errdefer gpa.free(views);
     for (images, 0..) |image, i| {
         const view_info: c.VkImageViewCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -163,6 +165,7 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
         if (c.vkCreateImageView(vulkan.device, &view_info, null, &views[i]) != c.VK_SUCCESS) {
             return error.VkCreateImageViewFailed;
         }
+        errdefer c.vkDestroyImageView(vulkan.device, views[i], null);
     }
 
     // create synchronization primitives
@@ -182,21 +185,25 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
     if (c.vkCreateSemaphore(vulkan.device, &semaphore_info, null, &image_available) != c.VK_SUCCESS) {
         return error.VkCreateSemaphoreFailed;
     }
+    errdefer c.vkDestroySemaphore(vulkan.device, image_available, null);
 
     var render_finished: c.VkSemaphore = undefined;
     if (c.vkCreateSemaphore(vulkan.device, &semaphore_info, null, &render_finished) != c.VK_SUCCESS) {
         return error.VkCreateSemaphoreFailed;
     }
+    errdefer c.vkDestroySemaphore(vulkan.device, render_finished, null);
 
     var in_flight: c.VkFence = undefined;
     if (c.vkCreateFence(vulkan.device, &fence_info, null, &in_flight) != c.VK_SUCCESS) {
         return error.VkCreateFenceFailed;
     }
+    errdefer c.vkDestroyFence(vulkan.device, in_flight, null);
 
     // bind swapchain to each of the appropriate descriptor sets
     // this only gets changed when the swapchain is re-initialized on resize
     // (this function is called again)
     const ds_swapchain = try gpa.alloc(c.VkDescriptorSet, image_count);
+    errdefer gpa.free(ds_swapchain);
     var i: u32 = 0;
     while (i < image_count) : (i += 1) {
         const ds_info: c.VkDescriptorSetAllocateInfo = .{
@@ -230,6 +237,89 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
 
         c.vkUpdateDescriptorSets(vulkan.device, 1, &ds_swapchain_write, 0, null);
     }
+    // TODO: this doesn't free in middle of loop
+    errdefer _ = c.vkFreeDescriptorSets(vulkan.device, vulkan.ds_pool, image_count, ds_swapchain.ptr);
+
+    const ds_cells_info: c.VkDescriptorSetAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = null,
+        .descriptorPool = vulkan.ds_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &vulkan.ds_layout_cells,
+    };
+
+    var ds_cells: c.VkDescriptorSet = undefined;
+    if (c.vkAllocateDescriptorSets(vulkan.device, &ds_cells_info, &ds_cells) != c.VK_SUCCESS) {
+        return error.VkAllocateDescriptorSetsFailed;
+    }
+    errdefer _ = c.vkFreeDescriptorSets(vulkan.device, vulkan.ds_pool, 1, &ds_cells);
+
+    // upload test buffer as SSBO for compute shader
+    const lipsum = @embedFile("../lipsum.txt");
+    const size = @sizeOf(u32) * lipsum.len;
+    const aligned_size = (size + 256 - 1) & ~(@as(usize, 256) - 1); // TODO: necessary?
+    std.debug.print("size: {} aligned: {}\n", .{ size, aligned_size });
+
+    var cells_ssbo_staging: c.VkBuffer = undefined;
+    var cells_mem_staging: c.VkDeviceMemory = undefined;
+    try vulkan.createBuffer(
+        // @sizeOf(App.Cell) * vulkan.app.cells.len,
+        aligned_size,
+        c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &cells_ssbo_staging,
+        &cells_mem_staging,
+    );
+    defer c.vkDestroyBuffer(vulkan.device, cells_ssbo_staging, null);
+    defer c.vkFreeMemory(vulkan.device, cells_mem_staging, null);
+
+    // var data: []u32 = undefined;
+    // data.len = lipsum.len;
+    // std.debug.print("lipsum: {}\n", .{lipsum.len});
+    // _ = c.vkMapMemory(vulkan.device, cells_mem_staging, 0, lipsum.len, 0, @ptrCast(&data.ptr));
+    var data: [*]u32 = undefined;
+    _ = c.vkMapMemory(vulkan.device, cells_mem_staging, 0, lipsum.len, 0, @ptrCast(&data));
+    // @memcpy(data, lipsum);
+    // data[0] = 0;
+    // data[1] = 1;
+    // data[2] = 128;
+    // data[3] = 255;
+    // @memset(data[0..lipsum.len], 128);
+    var j: usize = 0;
+    while (j < lipsum.len) : (j += 1) data[j] = lipsum[j];
+    // @memset(data, 128);
+    c.vkUnmapMemory(vulkan.device, cells_mem_staging);
+
+    var cells_ssbo: c.VkBuffer = undefined;
+    var cells_mem: c.VkDeviceMemory = undefined;
+    try vulkan.createBuffer(
+        // @sizeOf(App.Cell) * vulkan.app.cells.len,
+        aligned_size,
+        c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &cells_ssbo,
+        &cells_mem,
+    );
+    vulkan.copyBuffer(cells_ssbo_staging, cells_ssbo, aligned_size);
+
+    const ds_cells_write: c.VkWriteDescriptorSet = .{
+        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = ds_cells,
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .pBufferInfo = &c.VkDescriptorBufferInfo{
+            .buffer = cells_ssbo,
+            .offset = 0,
+            .range = aligned_size,
+        },
+        .pImageInfo = null,
+        .pTexelBufferView = null,
+    };
+
+    c.vkUpdateDescriptorSets(vulkan.device, 1, &ds_cells_write, 0, null);
 
     return .{
         .gpa = gpa,
@@ -244,9 +334,8 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
         .image_available = image_available,
         .render_finished = render_finished,
         .in_flight = in_flight,
+        .ds_cells = ds_cells,
     };
-
-    // self.command_buffer = try self.createCommandBuffer();
 }
 
 pub fn deinit(self: *Swapchain) void {
@@ -261,9 +350,9 @@ pub fn deinit(self: *Swapchain) void {
     self.gpa.free(self.images);
     c.vkDestroySwapchainKHR(vulkan.device, self.swapchain, null);
 
-    const result = c.vkFreeDescriptorSets(vulkan.device, vulkan.ds_pool, @intCast(self.ds_swapchain.len), self.ds_swapchain.ptr);
-    std.debug.print("free: {}\n", .{result});
+    _ = c.vkFreeDescriptorSets(vulkan.device, vulkan.ds_pool, @intCast(self.ds_swapchain.len), self.ds_swapchain.ptr);
     self.gpa.free(self.ds_swapchain);
+    _ = c.vkFreeDescriptorSets(vulkan.device, vulkan.ds_pool, 1, &self.ds_cells);
 
     c.vkDestroySemaphore(vulkan.device, self.image_available, null);
     c.vkDestroySemaphore(vulkan.device, self.render_finished, null);
@@ -300,6 +389,16 @@ fn recordCommandBuffer(
         0,
         1,
         &self.ds_swapchain[image_index],
+        0,
+        0,
+    );
+    c.vkCmdBindDescriptorSets(
+        vulkan.cmd_buffer,
+        c.VK_PIPELINE_BIND_POINT_COMPUTE,
+        vulkan.pipeline_layout,
+        1,
+        1,
+        &self.ds_cells,
         0,
         0,
     );

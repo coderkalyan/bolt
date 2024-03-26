@@ -4,7 +4,7 @@ const App = @import("../App.zig");
 const Wayland = @import("../Wayland.zig");
 const Allocator = std.mem.Allocator;
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("vulkan/vulkan.h");
     @cInclude("vulkan/vulkan_wayland.h");
     @cInclude("vulkan/vk_enum_string_helper.h");
@@ -25,21 +25,6 @@ const SwapChainSupport = struct {
     modes: []const c.VkPresentModeKHR,
 };
 
-const Swapchain = struct {
-    swapchain: c.VkSwapchainKHR,
-    images: []const c.VkImage,
-    format: c.VkFormat,
-    extent: c.VkExtent2D,
-    image_views: []const c.VkImageView,
-};
-
-const SyncObjects = struct {
-    image_available: c.VkSemaphore,
-    render_finished: c.VkSemaphore,
-    in_flight: c.VkFence,
-};
-
-// gpa: Allocator,
 app: *App,
 
 instance: c.VkInstance,
@@ -54,6 +39,7 @@ cmd_pool: c.VkCommandPool,
 cmd_buffer: c.VkCommandBuffer,
 ds_pool: c.VkDescriptorPool,
 ds_layout_swapchain: c.VkDescriptorSetLayout,
+ds_layout_cells: c.VkDescriptorSetLayout,
 pipeline: c.VkPipeline,
 pipeline_layout: c.VkPipelineLayout,
 
@@ -70,22 +56,36 @@ pub fn init(app: *App) !Vulkan {
         .applicationVersion = c.VK_MAKE_VERSION(0, 0, 1),
         .pEngineName = "bolt",
         .engineVersion = c.VK_MAKE_VERSION(0, 0, 1),
-        .apiVersion = c.VK_API_VERSION_1_0,
+        .apiVersion = c.VK_API_VERSION_1_2, // TODO: may not be needed
     };
 
-    const extensions: []const [*:0]const u8 = &.{
+    const extensions: []const [*:0]const u8 = if (builtin.mode == .Debug) &.{
+        c.VK_KHR_SURFACE_EXTENSION_NAME,
+        c.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+        c.VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME,
+        c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+    } else &.{
         c.VK_KHR_SURFACE_EXTENSION_NAME,
         c.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
     };
 
     const debug_layers: []const [*:0]const u8 = &.{
         "VK_LAYER_KHRONOS_validation",
-        // "VK_LAYER_LUNARG_standard_validation",
+    };
+
+    const validation_enables: []const c.VkValidationFeatureEnableEXT = &.{c.VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT};
+    const validation_features: c.VkValidationFeaturesEXT = .{
+        .sType = c.VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+        .pNext = null,
+        .enabledValidationFeatureCount = validation_enables.len,
+        .pEnabledValidationFeatures = validation_enables.ptr,
+        .disabledValidationFeatureCount = 0,
+        .pDisabledValidationFeatures = null,
     };
 
     const instance_info: c.VkInstanceCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = null,
+        .pNext = if (builtin.mode == .Debug) &validation_features else null,
         .flags = 0,
         .pApplicationInfo = &application_info,
         .enabledLayerCount = if (builtin.mode == .Debug) @intCast(debug_layers.len) else 0,
@@ -95,8 +95,28 @@ pub fn init(app: *App) !Vulkan {
     };
 
     var instance: c.VkInstance = undefined;
-    if (c.vkCreateInstance(&instance_info, null, &instance) != c.VK_SUCCESS) {
+    const res = c.vkCreateInstance(&instance_info, null, &instance);
+    if (res != c.VK_SUCCESS) {
+        std.debug.print("{}\n", .{res});
         return error.VkCreateInstanceFailed;
+    }
+    errdefer c.vkDestroyInstance(instance, null);
+
+    const messenger_info: c.VkDebugUtilsMessengerCreateInfoEXT = .{
+        .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .pNext = null,
+        .flags = 0,
+        .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debugCallback,
+        .pUserData = null,
+    };
+
+    var messenger: c.VkDebugUtilsMessengerEXT = undefined;
+    if (builtin.mode == .Debug) {
+        const func: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+        if (func == null) return error.VkExtensionNotPresent;
+        if (func.?(instance, &messenger_info, null, &messenger) != c.VK_SUCCESS) return error.VkCreateDebugMessengerFailed;
     }
 
     // bind wayland surface to vulkan surface
@@ -112,6 +132,7 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreateWaylandSurfaceKHR(instance, &surface_info, null, &surface) != c.VK_SUCCESS) {
         return error.VkCreateSurfaceFailed;
     }
+    errdefer c.vkDestroySurfaceKHR(instance, surface, null);
 
     // select a physical device
     var phydev_count: u32 = 0;
@@ -169,7 +190,10 @@ pub fn init(app: *App) !Vulkan {
     var device_features: c.VkPhysicalDeviceFeatures = undefined;
     @memset(std.mem.asBytes(&device_features), 0);
 
-    const device_extensions: []const [*:0]const u8 = &.{
+    const device_extensions: []const [*:0]const u8 = if (builtin.mode == .Debug) &.{
+        c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        c.VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+    } else &.{
         c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
     // TODO: compatibility checks for swapchain
@@ -190,6 +214,7 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreateDevice(phydev, &device_info, null, &device) != c.VK_SUCCESS) {
         return error.VkCreateDeviceFailed;
     }
+    errdefer c.vkDestroyDevice(device, null);
 
     // create command pool
     const cmd_pool_info: c.VkCommandPoolCreateInfo = .{
@@ -203,11 +228,12 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreateCommandPool(device, &cmd_pool_info, null, &cmd_pool) != c.VK_SUCCESS) {
         return error.VkCreateCommandPoolFailed;
     }
+    errdefer c.vkDestroyCommandPool(device, cmd_pool, null);
 
     // create descriptor pool
     const ds_image_size: c.VkDescriptorPoolSize = .{
         .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 16,
+        .descriptorCount = 8,
     };
 
     const ds_buffer_size: c.VkDescriptorPoolSize = .{
@@ -226,13 +252,14 @@ pub fn init(app: *App) !Vulkan {
         .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
         .poolSizeCount = ds_pool_sizes.len,
         .pPoolSizes = ds_pool_sizes.ptr,
-        .maxSets = 4,
+        .maxSets = 8,
     };
 
     var ds_pool: c.VkDescriptorPool = undefined;
     if (c.vkCreateDescriptorPool(device, &ds_pool_info, null, &ds_pool) != c.VK_SUCCESS) {
         return error.VkCreateDescriptorPoolFailed;
     }
+    errdefer c.vkDestroyDescriptorPool(device, ds_pool, null);
 
     // initialize descriptor set layouts
     // the swapchain is only bound per window resize/monitor change (infrequently)
@@ -245,7 +272,7 @@ pub fn init(app: *App) !Vulkan {
         .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
     };
 
-    var ds_layout_info: c.VkDescriptorSetLayoutCreateInfo = .{
+    var ds_layout_sw_info: c.VkDescriptorSetLayoutCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = null,
         .flags = 0,
@@ -254,9 +281,33 @@ pub fn init(app: *App) !Vulkan {
     };
 
     var ds_layout_swapchain: c.VkDescriptorSetLayout = undefined;
-    if (c.vkCreateDescriptorSetLayout(device, &ds_layout_info, null, &ds_layout_swapchain) != c.VK_SUCCESS) {
+    if (c.vkCreateDescriptorSetLayout(device, &ds_layout_sw_info, null, &ds_layout_swapchain) != c.VK_SUCCESS) {
         return error.VkCreateDescriptorSetLayoutFailed;
     }
+    errdefer c.vkDestroyDescriptorSetLayout(device, ds_layout_swapchain, null);
+
+    // temporary
+    const cells_ssbo_binding: c.VkDescriptorSetLayoutBinding = .{
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pImmutableSamplers = null,
+        .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    var ds_layout_cl_info: c.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .bindingCount = 1,
+        .pBindings = &cells_ssbo_binding,
+    };
+
+    var ds_layout_cells: c.VkDescriptorSetLayout = undefined;
+    if (c.vkCreateDescriptorSetLayout(device, &ds_layout_cl_info, null, &ds_layout_cells) != c.VK_SUCCESS) {
+        return error.VkCreateDescriptorSetLayoutFailed;
+    }
+    errdefer c.vkDestroyDescriptorSetLayout(device, ds_layout_cells, null);
 
     // initialize queues
     var comp_queue: c.VkQueue = undefined;
@@ -300,12 +351,17 @@ pub fn init(app: *App) !Vulkan {
         .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
     };
 
+    const ds_layouts: []const c.VkDescriptorSetLayout = &.{
+        ds_layout_swapchain,
+        ds_layout_cells,
+    };
+
     const layout_info: c.VkPipelineLayoutCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .setLayoutCount = 1,
-        .pSetLayouts = &ds_layout_swapchain,
+        .setLayoutCount = @intCast(ds_layouts.len),
+        .pSetLayouts = ds_layouts.ptr,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_info,
     };
@@ -314,6 +370,7 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreatePipelineLayout(device, &layout_info, null, &layout) != c.VK_SUCCESS) {
         return error.VkCreatePipelineLayoutFailed;
     }
+    errdefer c.vkDestroyPipelineLayout(device, layout, null);
 
     const pipeline_info: c.VkComputePipelineCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -329,6 +386,7 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkCreateComputePipelines(device, @ptrCast(c.VK_NULL_HANDLE), 1, &pipeline_info, null, &pipeline) != c.VK_SUCCESS) {
         return error.VkCreateComputePipelineFailed;
     }
+    errdefer c.vkDestroyPipeline(device, pipeline, null);
 
     // create primary command buffer for rendering, this can be reused per frame
     // TODO: eventually, should try to cache the command buffer recording
@@ -344,6 +402,7 @@ pub fn init(app: *App) !Vulkan {
     if (c.vkAllocateCommandBuffers(device, &cmd_buffer_info, &cmd_buffer) != c.VK_SUCCESS) {
         return error.VkAllocateCommandBuffersFailed;
     }
+    errdefer c.vkFreeCommandBuffers(device, cmd_pool, 1, &cmd_buffer);
 
     return .{
         .app = app,
@@ -359,6 +418,7 @@ pub fn init(app: *App) !Vulkan {
         .cmd_buffer = cmd_buffer,
         .ds_pool = ds_pool,
         .ds_layout_swapchain = ds_layout_swapchain,
+        .ds_layout_cells = ds_layout_cells,
         .pipeline = pipeline,
         .pipeline_layout = layout,
     };
@@ -373,6 +433,14 @@ pub fn deinit(self: *Vulkan) void {
     c.vkDestroyDevice(self.device, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyInstance(self.instance, null);
+}
+
+export fn debugCallback(severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT, ty: c.VkDebugUtilsMessageTypeFlagsEXT, data: ?*const c.VkDebugUtilsMessengerCallbackDataEXT, _: ?*const anyopaque) c.VkBool32 {
+    _ = severity;
+    _ = ty;
+    std.log.err("validation layer: {s}", .{data.?.pMessage});
+
+    return c.VK_FALSE;
 }
 
 fn findQueueFamilies(
@@ -440,4 +508,104 @@ fn querySwapchainSupport(
         .formats = formats,
         .modes = modes,
     };
+}
+
+fn findMemoryType(phydev: c.VkPhysicalDevice, filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
+    var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
+    c.vkGetPhysicalDeviceMemoryProperties(phydev, &mem_properties);
+
+    var i: u5 = 0;
+    while (i < mem_properties.memoryTypeCount) : (i += 1) {
+        if ((filter & (@as(u32, 1) << i) > 0) and (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+
+    return error.MemoryNotFound;
+}
+
+pub fn createBuffer(
+    self: *const Vulkan,
+    size: c.VkDeviceSize,
+    usage: c.VkBufferUsageFlags,
+    properties: c.VkMemoryPropertyFlags,
+    buffer: *c.VkBuffer,
+    memory: *c.VkDeviceMemory,
+) !void {
+    const buffer_info: c.VkBufferCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .size = size,
+        .usage = usage,
+        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+    };
+
+    if (c.vkCreateBuffer(self.device, &buffer_info, null, buffer) != c.VK_SUCCESS) {
+        return error.VkCreateBufferFailed;
+    }
+    errdefer c.vkDestroyBuffer(self.device, buffer.*, null);
+
+    var requirements: c.VkMemoryRequirements = undefined;
+    c.vkGetBufferMemoryRequirements(self.device, buffer.*, &requirements);
+
+    const alloc_info: c.VkMemoryAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = null,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = try findMemoryType(self.phydev, requirements.memoryTypeBits, properties),
+    };
+
+    if (c.vkAllocateMemory(self.device, &alloc_info, null, memory) != c.VK_SUCCESS) {
+        return error.VkAllocateMemoryFailed;
+    }
+    errdefer c.vkFreeMemory(self.device, memory, null);
+
+    _ = c.vkBindBufferMemory(self.device, buffer.*, memory.*, 0);
+}
+
+pub fn copyBuffer(self: *const Vulkan, src: c.VkBuffer, dest: c.VkBuffer, size: c.VkDeviceSize) void {
+    const cmd_buffer_info: c.VkCommandBufferAllocateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = null,
+        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = self.cmd_pool,
+        .commandBufferCount = 1,
+    };
+
+    var cmd_buffer: c.VkCommandBuffer = undefined;
+    _ = c.vkAllocateCommandBuffers(self.device, &cmd_buffer_info, &cmd_buffer);
+    defer c.vkFreeCommandBuffers(self.device, self.cmd_pool, 1, &cmd_buffer);
+
+    const begin_info: c.VkCommandBufferBeginInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = null,
+        .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = null,
+    };
+    _ = c.vkBeginCommandBuffer(cmd_buffer, &begin_info);
+
+    const region: c.VkBufferCopy = .{
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size,
+    };
+    c.vkCmdCopyBuffer(cmd_buffer, src, dest, 1, &region);
+    _ = c.vkEndCommandBuffer(cmd_buffer);
+
+    const submit_info: c.VkSubmitInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = null,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd_buffer,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = null,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = null,
+        .pWaitDstStageMask = null,
+    };
+    _ = c.vkQueueSubmit(self.comp_queue, 1, &submit_info, @ptrCast(c.VK_NULL_HANDLE));
+    _ = c.vkQueueWaitIdle(self.comp_queue);
 }

@@ -10,7 +10,7 @@ pub fn main() !void {
     const start = std.time.microTimestamp();
 
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
+    defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
 
     // var glyph_cache = try GlyphCache.init();
     // defer glyph_cache.deinit();
@@ -21,6 +21,7 @@ pub fn main() !void {
     var app = try App.init(general_purpose_allocator.allocator());
     defer app.deinit();
     try app.configure();
+    defer app.deconfigure();
 
     // const wayland_done = std.time.microTimestamp();
 
@@ -57,8 +58,10 @@ pub fn main() !void {
     std.debug.print("vulkan time taken: {}\n", .{vulkan_done - glyph_done});
 
     app.running = true;
+    // try app.vk_swapchain.drawFrame();
     while (app.running) {
         if (app.wayland.display.dispatch() != .SUCCESS) break;
+        // std.debug.print("drawing\n", .{});
         try app.vk_swapchain.drawFrame();
     }
 }

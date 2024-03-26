@@ -1,10 +1,16 @@
 #version 450
 
+#extension GL_EXT_debug_printf : enable
+
 // TODO: make this an image
 /*layout(binding = 0, std140) readonly buffer atlas_buffer {
     uint atlas[];
 };*/
-layout(binding = 0, rgba8) uniform writeonly image2D dest;
+layout(set = 0, binding = 0, rgba8ui) uniform writeonly uimage2D udest;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D fdest;
+layout(set = 1, binding = 0) readonly buffer cells_buffer {
+    uint cells[];
+};
 
 layout(push_constant) uniform constants {
     uvec2 size;
@@ -13,18 +19,18 @@ layout(push_constant) uniform constants {
     uvec2 offset;
 } terminal;
 
-ivec4 colors[4] = ivec4[](
-    ivec4(255, 0, 0, 0),
-    ivec4(0, 255, 0, 0),
-    ivec4(0, 0, 255, 0),
-    ivec4(255, 255, 255, 0)
+uvec4 colors[4] = uvec4[](
+    uvec4(10, 0, 0, 255),
+    uvec4(0, 255, 0, 255),
+    uvec4(0, 0, 255, 255),
+    uvec4(255, 255, 255, 255)
 );
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 void main() {
     uvec2 coord = gl_GlobalInvocationID.xy;
-    uvec2 dest_size = imageSize(dest);
+    uvec2 dest_size = imageSize(fdest);
 
     if (coord.x >= dest_size.x || coord.y >= dest_size.y) {
         return;
@@ -35,6 +41,15 @@ void main() {
 
     //uint pixel = atlas[97 * (terminal.cell_size.x * terminal.cell_size.y) + offset.y * terminal.cell_size.y + offset.x];
     //uint pixel = atlas[0];
-    imageStore(dest, ivec2(coord), colors[(cell.x + cell.y) % 4]);
+    //uint cell_index = (cell.x + cell.y) % 4; //cell.y * terminal.cells.x + cell.x;
+    uint cell_index = cell.y * terminal.cells.x + cell.x;
+    //uint pixel = (cells[cell_index >> 2] >> (cell_index & 0x3)) & 0xff;
+    uint pixel = cells[cell_index];
+    //if (coord.x == 0 && coord.y == 0) debugPrintfEXT("cells are: %d %d %d [%d]\n", cells[0], cells[1], cells[2], cell_index);
+    //debugPrintfEXT("cells are: %d %d %d [%d]\n", cells[0], cells[1], cells[2], cell_index);
+    //if (cell_index < 10) debugPrintfEXT("%d: %d ", cell_index, pixel);
+    if (offset.x == 0 && offset.y == 0) debugPrintfEXT("%d: %d ", cell_index, pixel);
+    //imageStore(fdest, ivec2(coord), ivec4(1, 1, 1, 1)); //colors[(cell.x + cell.y) % 4]);
     //imageStore(dest, ivec2(coord), ivec4(pixel, pixel, pixel, 255));
+    imageStore(fdest, ivec2(coord), vec4(pixel / 255.0f, pixel / 255.0f, pixel / 255.0f, 1));
 }
