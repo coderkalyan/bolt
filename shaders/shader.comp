@@ -43,13 +43,13 @@ void main() {
     //uint pixel = atlas[0];
     //uint cell_index = (cell.x + cell.y) % 4; //cell.y * terminal.cells.x + cell.x;
     uint cell_index = cell.y * terminal.cells.x + cell.x;
-    //uint pixel = (cells[cell_index >> 2] >> (cell_index & 0x3)) & 0xff;
-    uint pixel = cells[cell_index];
+    uint char = (cells[cell_index >> 2] >> (cell_index & 0x3)) & 0xff;
+    vec3 pixel = char / vec3(255.0, 255.0, 255.0);
     //if (coord.x == 0 && coord.y == 0) debugPrintfEXT("cells are: %d %d %d [%d]\n", cells[0], cells[1], cells[2], cell_index);
     //debugPrintfEXT("cells are: %d %d %d [%d]\n", cells[0], cells[1], cells[2], cell_index);
     //if (cell_index < 10) debugPrintfEXT("%d: %d ", cell_index, pixel);
-    if (offset.x == 0 && offset.y == 0) debugPrintfEXT("%d: %d ", cell_index, pixel);
+    //if (offset.x == 0 && offset.y == 0) debugPrintfEXT("%d: %d ", cell_index, char);
     //imageStore(fdest, ivec2(coord), ivec4(1, 1, 1, 1)); //colors[(cell.x + cell.y) % 4]);
     //imageStore(dest, ivec2(coord), ivec4(pixel, pixel, pixel, 255));
-    imageStore(fdest, ivec2(coord), vec4(pixel / 255.0f, pixel / 255.0f, pixel / 255.0f, 1));
+    imageStore(fdest, ivec2(coord), vec4(pixel.xyz, 1.0));
 }

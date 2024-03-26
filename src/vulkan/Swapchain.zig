@@ -256,14 +256,12 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
 
     // upload test buffer as SSBO for compute shader
     const lipsum = @embedFile("../lipsum.txt");
-    const size = @sizeOf(u32) * lipsum.len;
+    const size = @sizeOf(u8) * lipsum.len;
     const aligned_size = (size + 256 - 1) & ~(@as(usize, 256) - 1); // TODO: necessary?
-    std.debug.print("size: {} aligned: {}\n", .{ size, aligned_size });
 
     var cells_ssbo_staging: c.VkBuffer = undefined;
     var cells_mem_staging: c.VkDeviceMemory = undefined;
     try vulkan.createBuffer(
-        // @sizeOf(App.Cell) * vulkan.app.cells.len,
         aligned_size,
         c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -273,27 +271,14 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
     defer c.vkDestroyBuffer(vulkan.device, cells_ssbo_staging, null);
     defer c.vkFreeMemory(vulkan.device, cells_mem_staging, null);
 
-    // var data: []u32 = undefined;
-    // data.len = lipsum.len;
-    // std.debug.print("lipsum: {}\n", .{lipsum.len});
-    // _ = c.vkMapMemory(vulkan.device, cells_mem_staging, 0, lipsum.len, 0, @ptrCast(&data.ptr));
-    var data: [*]u32 = undefined;
+    var data: [*]u8 = undefined;
     _ = c.vkMapMemory(vulkan.device, cells_mem_staging, 0, lipsum.len, 0, @ptrCast(&data));
-    // @memcpy(data, lipsum);
-    // data[0] = 0;
-    // data[1] = 1;
-    // data[2] = 128;
-    // data[3] = 255;
-    // @memset(data[0..lipsum.len], 128);
-    var j: usize = 0;
-    while (j < lipsum.len) : (j += 1) data[j] = lipsum[j];
-    // @memset(data, 128);
+    @memcpy(data, lipsum);
     c.vkUnmapMemory(vulkan.device, cells_mem_staging);
 
     var cells_ssbo: c.VkBuffer = undefined;
     var cells_mem: c.VkDeviceMemory = undefined;
     try vulkan.createBuffer(
-        // @sizeOf(App.Cell) * vulkan.app.cells.len,
         aligned_size,
         c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -421,7 +406,7 @@ fn recordCommandBuffer(
         0,
         null,
         1,
-        &@as(c.VkImageMemoryBarrier, .{
+        &c.VkImageMemoryBarrier{
             .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = null,
             .srcAccessMask = 0,
@@ -438,7 +423,7 @@ fn recordCommandBuffer(
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-        }),
+        },
     );
 
     const width = self.app.terminal.size.width;
@@ -455,7 +440,7 @@ fn recordCommandBuffer(
         0,
         null,
         1,
-        &@as(c.VkImageMemoryBarrier, .{
+        &c.VkImageMemoryBarrier{
             .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = null,
             .srcAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT,
@@ -472,7 +457,7 @@ fn recordCommandBuffer(
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-        }),
+        },
     );
 
     if (c.vkEndCommandBuffer(vulkan.cmd_buffer) != c.VK_SUCCESS) {
