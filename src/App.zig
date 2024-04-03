@@ -3,6 +3,7 @@ const Wayland = @import("Wayland.zig");
 // const Vulkan = @import("Vulkan.zig");
 const VulkanInstance = @import("vulkan/Instance.zig");
 const Swapchain = @import("vulkan/Swapchain.zig");
+const Atlas = @import("vulkan/Atlas.zig");
 const GlyphCache = @import("GlyphCache.zig");
 const Allocator = std.mem.Allocator;
 
@@ -12,6 +13,7 @@ gpa: Allocator,
 wayland: Wayland,
 vk_instance: VulkanInstance,
 vk_swapchain: Swapchain,
+vk_atlas: Atlas,
 glyph_cache: GlyphCache,
 cells: std.MultiArrayList(Cell),
 
@@ -45,9 +47,10 @@ pub fn init(gpa: Allocator) !App {
     const app: App = .{
         .gpa = gpa,
         .wayland = try Wayland.init(),
-        .glyph_cache = undefined, //try GlyphCache.init(),
+        .glyph_cache = try GlyphCache.init(gpa),
         .vk_instance = undefined,
         .vk_swapchain = undefined,
+        .vk_atlas = undefined,
         .configured = false,
         .running = false,
         .terminal = .{
@@ -72,15 +75,18 @@ pub fn configure(app: *App) !void {
     try app.wayland.configureToplevel();
     app.vk_instance = try VulkanInstance.init(app);
     app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
+    app.vk_atlas = try Atlas.init(app.gpa, &app.vk_instance);
     app.configured = true;
 }
 
 pub fn deinit(app: *App) void {
     app.cells.deinit(app.gpa);
     app.wayland.deinit();
+    app.glyph_cache.deinit(app.gpa);
 }
 
 pub fn deconfigure(app: *App) void {
+    app.vk_atlas.deinit();
     app.vk_swapchain.deinit();
     app.vk_instance.deinit();
 }

@@ -22,7 +22,6 @@ ds_swapchain: []const c.VkDescriptorSet,
 image_available: c.VkSemaphore,
 render_finished: c.VkSemaphore,
 in_flight: c.VkFence,
-
 ds_cells: c.VkDescriptorSet,
 
 pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
@@ -316,10 +315,10 @@ pub fn init(gpa: Allocator, vulkan: *const Instance) !Swapchain {
         .extent = extent,
         .views = views,
         .ds_swapchain = ds_swapchain,
+        .ds_cells = ds_cells,
         .image_available = image_available,
         .render_finished = render_finished,
         .in_flight = in_flight,
-        .ds_cells = ds_cells,
     };
 }
 
@@ -485,7 +484,9 @@ pub fn drawFrame(self: *Swapchain) !void {
         else => return error.VkAcquireImageFailed,
     }
 
+    const start = std.time.microTimestamp();
     _ = c.vkResetCommandBuffer(vulkan.cmd_buffer, 0);
+    const end = std.time.microTimestamp();
     // TODO: cache this?
     try self.recordCommandBuffer(image_index);
 
@@ -511,6 +512,20 @@ pub fn drawFrame(self: *Swapchain) !void {
         return error.VkSubmitDrawFailed;
     }
 
+    _ = c.vkWaitSemaphores(
+        vulkan.device,
+        &c.VkSemaphoreWaitInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .pNext = null,
+            .flags = 0,
+            .semaphoreCount = 1,
+            .pSemaphores = &self.render_finished,
+            .pValues = &@as(u64, 0),
+        },
+        std.math.maxInt(u64),
+    );
+
+    std.debug.print("frame time: {}\n", .{end - start});
     const present_info: c.VkPresentInfoKHR = .{
         .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = null,

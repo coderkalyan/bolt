@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("vulkan");
     exe.linkSystemLibrary("fcft");
     exe.linkSystemLibrary("pixman-1");
+    exe.linkSystemLibrary("fontconfig");
 
     scanner.addCSource(exe);
 

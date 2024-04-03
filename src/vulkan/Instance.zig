@@ -40,6 +40,7 @@ cmd_buffer: c.VkCommandBuffer,
 ds_pool: c.VkDescriptorPool,
 ds_layout_swapchain: c.VkDescriptorSetLayout,
 ds_layout_cells: c.VkDescriptorSetLayout,
+ds_layout_atlas: c.VkDescriptorSetLayout,
 pipeline: c.VkPipeline,
 pipeline_layout: c.VkPipelineLayout,
 
@@ -158,6 +159,7 @@ pub fn init(app: *App) !Vulkan {
             else => return err,
         };
 
+        // TODO: check for bindless support
         const support = try querySwapchainSupport(arena, device, surface);
         if (support.formats.len == 0 or support.modes.len == 0) continue;
         if (phydev == null or properties.deviceType == c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
@@ -246,10 +248,11 @@ pub fn init(app: *App) !Vulkan {
         ds_buffer_size,
     };
 
+    // TODO: instead of free descriptor set, just reset the whole pool
     const ds_pool_info: c.VkDescriptorPoolCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = null,
-        .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | c.VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
         .poolSizeCount = ds_pool_sizes.len,
         .pPoolSizes = ds_pool_sizes.ptr,
         .maxSets = 8,
@@ -308,6 +311,37 @@ pub fn init(app: *App) !Vulkan {
         return error.VkCreateDescriptorSetLayoutFailed;
     }
     errdefer c.vkDestroyDescriptorSetLayout(device, ds_layout_cells, null);
+
+    // glyph atlas
+    const atlas_ssbo_binding: c.VkDescriptorSetLayoutBinding = .{
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pImmutableSamplers = null,
+        .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    const flags: c.VkDescriptorBindingFlags = c.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | c.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    const ds_atlas_flags_info: c.VkDescriptorSetLayoutBindingFlagsCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+        .pNext = null,
+        .bindingCount = 1,
+        .pBindingFlags = &flags,
+    };
+
+    const ds_layout_atlas_info: c.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = &ds_atlas_flags_info,
+        .flags = c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
+        .bindingCount = 1,
+        .pBindings = &atlas_ssbo_binding,
+    };
+
+    var ds_layout_atlas: c.VkDescriptorSetLayout = undefined;
+    if (c.vkCreateDescriptorSetLayout(device, &ds_layout_atlas_info, null, &ds_layout_atlas) != c.VK_SUCCESS) {
+        return error.VkCreateDescriptorSetLayoutFailed;
+    }
+    errdefer c.vkDestroyDescriptorSetLayout(device, ds_layout_atlas, null);
 
     // initialize queues
     var comp_queue: c.VkQueue = undefined;
@@ -419,6 +453,7 @@ pub fn init(app: *App) !Vulkan {
         .ds_pool = ds_pool,
         .ds_layout_swapchain = ds_layout_swapchain,
         .ds_layout_cells = ds_layout_cells,
+        .ds_layout_atlas = ds_layout_atlas,
         .pipeline = pipeline,
         .pipeline_layout = layout,
     };
@@ -427,6 +462,8 @@ pub fn init(app: *App) !Vulkan {
 pub fn deinit(self: *Vulkan) void {
     c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
     c.vkDestroyPipeline(self.device, self.pipeline, null);
+    c.vkDestroyDescriptorSetLayout(self.device, self.ds_layout_atlas, null);
+    c.vkDestroyDescriptorSetLayout(self.device, self.ds_layout_cells, null);
     c.vkDestroyDescriptorSetLayout(self.device, self.ds_layout_swapchain, null);
     c.vkDestroyDescriptorPool(self.device, self.ds_pool, null);
     c.vkDestroyCommandPool(self.device, self.cmd_pool, null);
