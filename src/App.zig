@@ -74,8 +74,20 @@ pub fn init(gpa: Allocator) !App {
 pub fn configure(app: *App) !void {
     try app.wayland.configureToplevel();
     app.vk_instance = try VulkanInstance.init(app);
+    errdefer app.vk_instance.deinit();
     app.vk_swapchain = try Swapchain.init(app.gpa, &app.vk_instance);
+    errdefer app.vk_swapchain.deinit();
     app.vk_atlas = try Atlas.init(app.gpa, &app.vk_instance);
+    errdefer app.vk_atlas.deinit();
+
+    // TODO: this is testing
+    var cp: u32 = 32;
+    while (cp <= 126) : (cp += 1) {
+        const glyph_index = try app.vk_atlas.request(cp);
+        std.debug.print("glyph index: {}\n", .{glyph_index});
+    }
+    try app.vk_atlas.commit();
+
     app.configured = true;
 }
 

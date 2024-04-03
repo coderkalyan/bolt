@@ -355,6 +355,7 @@ fn recordCommandBuffer(
     // * dispatch compute
     // * image memory barrier: general -> present_src for presentation
     const vulkan = self.vulkan;
+    const app = @fieldParentPtr(App, "vk_instance", vulkan);
     const begin_info: c.VkCommandBufferBeginInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = null,
@@ -383,6 +384,16 @@ fn recordCommandBuffer(
         1,
         1,
         &self.ds_cells,
+        0,
+        0,
+    );
+    c.vkCmdBindDescriptorSets(
+        vulkan.cmd_buffer,
+        c.VK_PIPELINE_BIND_POINT_COMPUTE,
+        vulkan.pipeline_layout,
+        2,
+        1,
+        &app.vk_atlas.ds,
         0,
         0,
     );
@@ -484,9 +495,9 @@ pub fn drawFrame(self: *Swapchain) !void {
         else => return error.VkAcquireImageFailed,
     }
 
-    const start = std.time.microTimestamp();
+    // const start = std.time.microTimestamp();
     _ = c.vkResetCommandBuffer(vulkan.cmd_buffer, 0);
-    const end = std.time.microTimestamp();
+    // const end = std.time.microTimestamp();
     // TODO: cache this?
     try self.recordCommandBuffer(image_index);
 
@@ -512,20 +523,20 @@ pub fn drawFrame(self: *Swapchain) !void {
         return error.VkSubmitDrawFailed;
     }
 
-    _ = c.vkWaitSemaphores(
-        vulkan.device,
-        &c.VkSemaphoreWaitInfo{
-            .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-            .pNext = null,
-            .flags = 0,
-            .semaphoreCount = 1,
-            .pSemaphores = &self.render_finished,
-            .pValues = &@as(u64, 0),
-        },
-        std.math.maxInt(u64),
-    );
+    // _ = c.vkWaitSemaphores(
+    //     vulkan.device,
+    //     &c.VkSemaphoreWaitInfo{
+    //         .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+    //         .pNext = null,
+    //         .flags = 0,
+    //         .semaphoreCount = 1,
+    //         .pSemaphores = &self.render_finished,
+    //         .pValues = &@as(u64, 0),
+    //     },
+    //     std.math.maxInt(u64),
+    // );
 
-    std.debug.print("frame time: {}\n", .{end - start});
+    // std.debug.print("frame time: {}\n", .{end - start});
     const present_info: c.VkPresentInfoKHR = .{
         .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = null,

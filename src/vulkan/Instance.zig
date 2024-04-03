@@ -170,6 +170,23 @@ pub fn init(app: *App) !Vulkan {
         }
     }
 
+    var indexing_features: c.VkPhysicalDeviceDescriptorIndexingFeatures = undefined;
+    indexing_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    indexing_features.pNext = null;
+
+    var device_features: c.VkPhysicalDeviceFeatures2 = undefined;
+    device_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    device_features.pNext = &indexing_features;
+
+    c.vkGetPhysicalDeviceFeatures2(phydev, &device_features);
+    // TODO: probably doesn't work in release, but needs to actuall return error
+    std.debug.assert(indexing_features.shaderSampledImageArrayNonUniformIndexing == 1);
+    std.debug.assert(indexing_features.descriptorBindingSampledImageUpdateAfterBind == 1);
+    std.debug.assert(indexing_features.shaderUniformBufferArrayNonUniformIndexing == 1);
+    std.debug.assert(indexing_features.descriptorBindingUniformBufferUpdateAfterBind == 1);
+    std.debug.assert(indexing_features.shaderStorageBufferArrayNonUniformIndexing == 1);
+    std.debug.assert(indexing_features.descriptorBindingStorageBufferUpdateAfterBind == 1);
+
     // create logical device
     const families: []const u32 = &.{ comp_index, pres_index };
     const queue_infos = try arena.alloc(c.VkDeviceQueueCreateInfo, families.len);
@@ -189,8 +206,8 @@ pub fn init(app: *App) !Vulkan {
         unique_queues += 1;
     }
 
-    var device_features: c.VkPhysicalDeviceFeatures = undefined;
-    @memset(std.mem.asBytes(&device_features), 0);
+    // var device_features: c.VkPhysicalDeviceFeatures = undefined;
+    // @memset(std.mem.asBytes(&device_features), 0);
 
     const device_extensions: []const [*:0]const u8 = if (builtin.mode == .Debug) &.{
         c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -201,11 +218,12 @@ pub fn init(app: *App) !Vulkan {
     // TODO: compatibility checks for swapchain
     const device_info: c.VkDeviceCreateInfo = .{
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = null,
+        .pNext = &device_features,
         .flags = 0,
         .queueCreateInfoCount = unique_queues,
         .pQueueCreateInfos = queue_infos.ptr,
-        .pEnabledFeatures = &device_features,
+        // .pEnabledFeatures = &device_features,
+        .pEnabledFeatures = null,
         .enabledExtensionCount = device_extensions.len,
         .ppEnabledExtensionNames = device_extensions.ptr,
         .enabledLayerCount = if (builtin.mode == .Debug) @intCast(debug_layers.len) else 0,
@@ -240,7 +258,7 @@ pub fn init(app: *App) !Vulkan {
 
     const ds_buffer_size: c.VkDescriptorPoolSize = .{
         .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 16,
+        .descriptorCount = 100000,
     };
 
     const ds_pool_sizes: []const c.VkDescriptorPoolSize = &.{
@@ -315,7 +333,7 @@ pub fn init(app: *App) !Vulkan {
     // glyph atlas
     const atlas_ssbo_binding: c.VkDescriptorSetLayoutBinding = .{
         .binding = 0,
-        .descriptorCount = 1,
+        .descriptorCount = 100000, // TODO: does this allocate anything?
         .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImmutableSamplers = null,
         .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT,
